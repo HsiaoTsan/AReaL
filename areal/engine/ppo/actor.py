@@ -186,10 +186,20 @@ class PPOActor:
         seq_stats = dict(
             no_eos_ratios=(seqlens == attn_mask.shape[-1]).float(),
             task_reward=reward_score.float(),
+            task_reward_var=torch.var(reward_score.float()).expand_as(reward_score),
             prompt_len=prompt_lens.float(),
             seq_len=seqlens.float(),
         )
         stats_tracker.stat(**seq_stats, denominator="n_seqs")
+        # For variance via E[x^2] - (E[x])^2, log second moment as well
+        stats_tracker.stat(
+            task_reward_sq=reward_score.float() ** 2, denominator="n_seqs"
+        )
+        # Also log a direct per-batch variance (unbiased=False) as a scalar for quick inspection
+        m = reward_score.float().mean().item()
+        m2 = (reward_score.float() ** 2).mean().item()
+        var_moment = max(0.0, m2 - m * m)
+        stats_tracker.scalar(task_reward_var_moment=var_moment)
         scalars = dict(
             mask_no_eos_with_zero=self.config.mask_no_eos_with_zero,
             eps_clip=self.config.eps_clip,
