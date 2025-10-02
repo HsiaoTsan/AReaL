@@ -1,5 +1,6 @@
 import functools
 from typing import Dict, List, Optional
+from collections import deque
 
 import torch
 from tensordict import TensorDict
@@ -39,6 +40,10 @@ class PPOActor:
         self.mask_no_eos_with_zero = config.mask_no_eos_with_zero
 
         self.temperature = config.temperature
+    
+    # Tracking for cross-step reward mean change (for variance over time)
+        self._prev_reward_mean: float | None = None
+        self._reward_mean_hist = deque(maxlen=20)
 
     @torch.no_grad()
     def compute_logp(
@@ -195,6 +200,31 @@ class PPOActor:
         stats_tracker.stat(
             task_reward_sq=reward_score.float() ** 2, denominator="n_seqs"
         )
+        # Also log a direct per-batch variance (unbiased=False) as a scalar for quick inspection
+        m = reward_score.float().mean().item()
+        m2 = (reward_score.float() ** 2).mean().item()
+        var_moment = max(0.0, m2 - m * m)
+        stats_tracker.scalar(task_reward_var_moment=var_moment)
+        # Cross-step change metrics: delta and z-score normalized by SE
+        n = int(reward_score.numel()) or 1
+        se = (var_moment / n) ** 0.5 if var_moment >= 0 else 0.0
+        if self._prev_reward_mean is not None:
+            delta = m - self._prev_reward_mean
+            z = abs(delta) / (se if se > 1e-8 else 1.0)
+            stats_tracker.scalar(
+                task_reward_delta=delta,
+                task_reward_delta_abs=abs(delta),
+                task_reward_delta_z=z,
+            )
+        self._prev_reward_mean = m
+        self._reward_mean_hist.append(m)
+        if len(self._reward_mean_hist) >= 2:
+            import torch as _torch
+            roll_var = _torch.tensor(list(self._reward_mean_hist)).float().var(unbiased=False).item()
+            stats_tracker.scalar(
+                task_reward_mean_roll_var=roll_var,
+                task_reward_mean_roll_std=(roll_var ** 0.5),
+            )
         # Also log a direct per-batch variance (unbiased=False) as a scalar for quick inspection
         m = reward_score.float().mean().item()
         m2 = (reward_score.float() ** 2).mean().item()
