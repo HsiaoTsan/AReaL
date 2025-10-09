@@ -122,9 +122,9 @@ class RemoteSGLangEngine(InferenceEngine):
             "image_data": image_data or [],
             "sampling_params": {
                 "top_p": 1.0,
-                "top_k": int(1e8),
+                "top_k": -1,
                 "max_new_tokens": 0,
-                "temperature": 0.0,
+                "temperature": 1.0,
             },
             "return_logprob": True,
             "stream": False,
@@ -251,8 +251,10 @@ class RemoteSGLangEngine(InferenceEngine):
 
         latency = time.perf_counter() - start_time
 
-        proximal_logprobs_t.extend(output_logprobs)
-
+        k = len(output_logprobs)
+        proximal_logprobs_t.extend(accumulated_output_logprobs[-k:])
+        if (len(proximal_logprobs_t) != len(accumulated_output_tokens)):
+            raise RuntimeError('proximal_logprobs_t length mismatch with output tokens')
         
 
 

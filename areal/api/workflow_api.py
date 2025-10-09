@@ -1,5 +1,6 @@
 import asyncio
 import itertools
+import os
 import queue
 import threading
 import time
@@ -316,13 +317,10 @@ class WorkflowExecutor:
             current_ver = self.inference_engine.get_version()
             if current_ver > self._last_purged_ver:
                 drained = 0
-                picked_prev = 0
                 dropped = 0
                 kept = 0
-                v0_picked = 0
-                v0_kept = 0
-                v0_dropped = 0
                 put_back_buf: List[TensorDict] = []
+
                 while True:
                     try:
                         traj = self.output_queue.get_nowait()
@@ -335,46 +333,40 @@ class WorkflowExecutor:
                         if versions is None or loss_mask is None:
                             put_back_buf.append(traj)
                             continue
+
                         ver = versions[0].tolist()
                         lm_row = loss_mask[0]
-                        if torch.is_tensor(lm_row):
-                            lm = lm_row.tolist()
-                        else:
-                            lm = list(lm_row)
-                        output_positions = [idx for idx, mask in enumerate(lm) if mask]
+                        lm = lm_row.tolist() if torch.is_tensor(lm_row) else list(lm_row)
+
+                        output_positions = [idx for idx, m in enumerate(lm) if m]
                         output_versions = [ver[idx] for idx in output_positions if ver[idx] >= 0]
                         if not output_versions:
                             put_back_buf.append(traj)
                             continue
+
                         max_version = max(output_versions)
                         min_version = min(output_versions)
+
                         patched_ver = _extract_version(traj.get(RECOMPUTE_VERSION_KEY, None))
                         recomputed = patched_ver is not None and patched_ver >= 0
+
                         tail_staleness = current_ver - max_version
                         head_staleness = current_ver - min_version if recomputed else None
                         staleness = head_staleness if recomputed else tail_staleness
+
                         allow_staleness = 1
                         if recomputed and self.config.max_head_offpolicyness is not None:
-                            allow_staleness = max(
-                                allow_staleness, int(self.config.max_head_offpolicyness)
-                            )
-                        contains_prev = (current_ver - 1) in output_versions
+                            allow_staleness = max(allow_staleness, int(self.config.max_head_offpolicyness))
+
                         if staleness > allow_staleness:
                             dropped += 1
-                            if max_version == 0:
-                                v0_dropped += 1
                         else:
                             put_back_buf.append(traj)
                             kept += 1
-                            if max_version == 0:
-                                v0_kept += 1
-                            if contains_prev:
-                                picked_prev += 1
-                                if max_version == 0:
-                                    v0_picked += 1
                     except Exception:
                         put_back_buf.append(traj)
                         traceback.print_exc()
+
                 for item in put_back_buf:
                     try:
                         _ensure_recompute_key(item)
@@ -382,12 +374,16 @@ class WorkflowExecutor:
                     except queue.Full:
                         _ensure_recompute_key(item)
                         self.result_cache.append(item)
+
                 logger.info(
-                    f"[QueuePurge] ver_switch to {current_ver}: drained={drained} picked_prev={picked_prev} dropped={dropped} kept={kept} cache_size={len(self.result_cache)} v0(picked/dropped/kept)={v0_picked}/{v0_dropped}/{v0_kept}"
+                    f"[QueuePurge] ver_switch to {current_ver}: "
+                    f"drained={drained} dropped={dropped} kept={kept} "
+                    f"cache_size={len(self.result_cache)}"
                 )
                 self._last_purged_ver = current_ver
         except Exception:
             traceback.print_exc()
+
 
         accepted = len(self.result_cache)
 
@@ -465,6 +461,9 @@ class WorkflowExecutor:
                         valid_len = min(valid_len, len(ver), len(lm))
                         if valid_len <= 0:
                             continue
+                        if patched_ver is not None and patched_ver >= current_ver:
+                            # 这条样本在 current_ver 已经重算/确认过了，直接跳过，避免重复重算
+                            continue
                         lm_valid = lm[:valid_len]
                         output_positions = [idx for idx, mask in enumerate(lm_valid) if mask]
                         out_len = len(output_positions)
@@ -472,6 +471,12 @@ class WorkflowExecutor:
                             continue
                         first_output_idx = output_positions[0]
                         start_index = max(0, first_output_idx - 1)
+                        if first_output_idx > 0:
+                            assert start_index == first_output_idx - 1, (
+                                f'start_index({start_index}) != first_output_idx-1({first_output_idx - 1})'
+                            )
+                        else:
+                            assert start_index == 0, 'start_index should be 0 when first_output_idx is 0'
                         need_positions = [
                             (pos_idx, seq_idx)
                             for pos_idx, seq_idx in enumerate(output_positions)
@@ -507,27 +512,72 @@ class WorkflowExecutor:
                             start_index=start_index,
                         )
                         patched_here = 0
+                        debug_diff = os.environ.get("AREAL_DEBUG_RECOMPUTE_DIFF")
+                        diff_entries = [] if debug_diff else None
+                        logprobs_field = td.get("logprobs", None) if debug_diff else None
                         max_required_offset = output_positions[-1] - start_index - 1
-                        if max_required_offset >= len(latest_out_logp):
-                            raise RuntimeError(
-                                f"Recompute length mismatch: required idx {max_required_offset} but got {len(latest_out_logp)} logprobs"
-                            )
+                        assert max_required_offset < len(latest_out_logp), (
+                            f'recompute too short: need {max_required_offset}, got {len(latest_out_logp) - 1}'
+                        )
                         for pos_idx, seq_idx in need_positions:
+                            assert lm[seq_idx], f'patching a non-output position seq_idx={seq_idx}'
                             rel_offset = seq_idx - start_index - 1
                             if rel_offset < 0 or rel_offset >= len(latest_out_logp):
                                 logger.warning(
                                     f"[Recompute] sample#{idx}: rel_offset={rel_offset} out_of_range for logprobs len={len(latest_out_logp)}"
                                 )
                                 continue
-                            prox[0, seq_idx] = float(latest_out_logp[rel_offset])
+                            new_val = float(latest_out_logp[rel_offset])
+                            old_val = float(prox[0, seq_idx].item())
+                            prox[0, seq_idx] = new_val
                             patched_here += 1
+                            if diff_entries is not None:
+                                infer_val = None
+                                try:
+                                    if logprobs_field is not None:
+                                        if torch.is_tensor(logprobs_field):
+                                            infer_val = float(logprobs_field[0, seq_idx].item())
+                                        else:
+                                            infer_val = float(logprobs_field[0][seq_idx])
+                                except Exception:
+                                    infer_val = None
+                                token_id = None
+                                try:
+                                    if seq_idx < len(ids):
+                                        token_id = int(ids[seq_idx])
+                                except Exception:
+                                    token_id = None
+                                diff_entries.append(
+                                    {
+                                        "seq_idx": int(seq_idx),
+                                        "token_id": token_id,
+                                        "old_prox": old_val,
+                                        "new_prox": new_val,
+                                        "infer_logp": infer_val,
+                                        "delta_prox": new_val - old_val,
+                                        "delta_infer": (None if infer_val is None else new_val - infer_val),
+                                    }
+                                )
                         if patched_here == 0:
                             continue
                         patched_value = torch.full_like(
                             versions[:, :1], int(current_ver), dtype=torch.int64
                         )
                         td.set(RECOMPUTE_VERSION_KEY, patched_value)
+                        if diff_entries:
+                            logger.info(
+                                f"[RecomputeDiff] sample#{idx} entries={diff_entries}"
+                            )
                         total_patched += patched_here
+                        logger.info(
+                            "[Recompute] sample=%d patched=%d start=%d old_tail=%s new_tail=%s token_ids=%s",
+                            idx,
+                            patched_here,
+                            start_index,
+                            [float(prox[0, pos]) for _, pos in need_positions[:5]],
+                            latest_out_logp[:5],
+                            ids[start_index + 1 : start_index + 6],
+                        )
                     except Exception:
                         traceback.print_exc()
                         continue
