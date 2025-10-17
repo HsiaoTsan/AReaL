@@ -44,7 +44,7 @@ python3 -u ${TASK}_eval.py \
     --end -1 \
     --use_vllm \
     --max_tokens_per_call=$MAX_GEN_TOKENS \
-    --tensor_parallel_size 4 \
+    --tensor_parallel_size 2 \
     --save_outputs \
     # --overwrite \
 

@@ -461,9 +461,6 @@ class WorkflowExecutor:
                         valid_len = min(valid_len, len(ver), len(lm))
                         if valid_len <= 0:
                             continue
-                        if patched_ver is not None and patched_ver >= current_ver:
-                            # 这条样本在 current_ver 已经重算/确认过了，直接跳过，避免重复重算
-                            continue
                         lm_valid = lm[:valid_len]
                         output_positions = [idx for idx, mask in enumerate(lm_valid) if mask]
                         out_len = len(output_positions)

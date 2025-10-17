@@ -124,7 +124,7 @@ class RemoteSGLangEngine(InferenceEngine):
                 "top_p": 1.0,
                 "top_k": -1,
                 "max_new_tokens": 0,
-                "temperature": 1.0,
+                "temperature": 0,
             },
             "return_logprob": True,
             "stream": False,

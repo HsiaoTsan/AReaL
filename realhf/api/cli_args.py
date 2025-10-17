@@ -231,7 +231,7 @@ class vLLMConfig:
     https://github.com/vllm-project/vllm for detailed documentation.
     """
 
-    max_num_seqs: int = 256
+    max_num_seqs: int = 128
     dtype: str = "float16"
     kv_cache_type: str = "auto"
     num_scheduler_steps: int = 1
@@ -239,14 +239,14 @@ class vLLMConfig:
     block_size: int = 16
     swap_space: int = 4
     cpu_offload_gb: float = 0
-    max_seq_len_to_capture: int = 32768
+    max_seq_len_to_capture: int = 8192
 
     disable_sliding_window: bool = True
 
     # NOTE: Defaults max_model_len to 32k because a larger value
     # will enable chunked prefill in vLLM, which will cause
     # evalution performance degeneration.
-    max_model_len: Optional[int] = 32768
+    max_model_len: Optional[int] = 8192
     enable_chunked_prefill: bool = False
 
     # NOTE: Setting enable_prefix_caching to False
@@ -255,7 +255,7 @@ class vLLMConfig:
     # will fix this issue.
     enable_prefix_caching: bool = False
 
-    gpu_memory_utilization: float = 0.9
+    gpu_memory_utilization: float = 0.93
 
     enforce_eager: bool = False
     hybrid_train: bool = False
