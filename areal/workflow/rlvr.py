@@ -102,6 +102,15 @@ class RLVRWorkflow(RolloutWorkflow):
             stats_tracker.get(self.rollout_stat_scope).scalar(reward=reward)
 
             rewards.append(reward)
+
+            # Segment-wise PPO: Include proximal_logprobs_t if available
+            # Pad with zeros for prompt tokens, similar to AReaL-segment approach
+            proximal_logprobs_t_padded = (
+                [0.0] * resp.input_len + resp.proximal_logprobs_t
+                if resp.proximal_logprobs_t
+                else []
+            )
+
             res = dict(
                 # unsqueeze to add an additional batch dimension
                 input_ids=torch.tensor(seq).unsqueeze(0),
@@ -112,6 +121,11 @@ class RLVRWorkflow(RolloutWorkflow):
                 # reward
                 rewards=torch.tensor([float(reward)]),
             )
+
+            # Only add proximal_logprobs_t if it's non-empty
+            if proximal_logprobs_t_padded:
+                res["proximal_logprobs_t"] = torch.tensor(proximal_logprobs_t_padded).unsqueeze(0)
+
             results.append(res)
 
         if self.dump_dir is not None:

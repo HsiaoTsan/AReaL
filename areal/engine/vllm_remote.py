@@ -137,6 +137,60 @@ class RemotevLLMEngine(InferenceEngine):
             return server
         raise NotImplementedError("Only round-robin scheduling is implemented.")
 
+    def recompute_prefill_logprobs(
+        self,
+        input_ids: List[int],
+        prompt_len: int,
+        image_data: Optional[List[Any]] = None,
+    ) -> List[float]:
+        """Recompute prefill logprobs for the output segment using vLLM.
+
+        Since vLLM doesn't have logprob_start_len like SGLang, we make a
+        separate request with max_tokens=0 to get prefill logprobs only.
+        Then we manually slice to extract output segment logprobs.
+
+        Args:
+            input_ids: full sequence (prompt + outputs)
+            prompt_len: length of the prompt segment
+            image_data: optional VLM images (unused for RLVR)
+
+        Returns:
+            A list of length len(input_ids) - prompt_len containing
+            prefill-computed logprobs for each output token.
+        """
+        server_addr = self.choose_server()
+        url = f"http://{server_addr}/v1/completions"
+
+        payload = {
+            "prompt": input_ids,
+            "max_tokens": 0,  # Only do prefill, no generation
+            "temperature": 0.0,
+            "logprobs": 0,
+            "return_tokens_as_token_ids": True,
+            "stream": False,
+        }
+
+        res = requests.post(url, json=payload, timeout=self.config.request_timeout)
+        res.raise_for_status()
+        result = res.json()
+
+        # Extract logprobs from response
+        meta_info = result["choices"][0]
+        token_logprobs = meta_info["logprobs"]["token_logprobs"]
+
+        # vLLM returns logprobs for all tokens in the sequence
+        # We need to slice from prompt_len onwards to get output logprobs
+        # Note: logprobs are shifted by 1 (logprob at position i is for predicting token i)
+        # So we slice from prompt_len to get logprobs for output tokens
+        if len(token_logprobs) <= prompt_len:
+            # Edge case: no output logprobs available
+            return []
+
+        # Extract logprobs for output segment
+        output_logprobs = token_logprobs[prompt_len:]
+
+        return output_logprobs
+
     async def agenerate(self, req: ModelRequest) -> ModelResponse:
         """Async version of generate using aiohttp."""
         # Prepare request payload
@@ -250,12 +304,39 @@ class RemotevLLMEngine(InferenceEngine):
         await session.close()
         latency = time.perf_counter() - start_time
 
+        # Segment-wise PPO: Recompute prefill logprobs for output tokens
+        proximal_logprobs_t = []
+        if len(accumulated_output_tokens) > 0:
+            try:
+                # Combine prompt + outputs to get full sequence
+                full_sequence = req.input_ids + accumulated_output_tokens
+                prompt_len = len(req.input_ids)
+
+                # Recompute prefill logprobs for the output segment
+                prefill_output_logprobs = self.recompute_prefill_logprobs(
+                    input_ids=full_sequence,
+                    prompt_len=prompt_len,
+                    image_data=req.image_data,
+                )
+
+                # Combine: prefill logprobs + decode logprobs
+                # This matches SGLang's approach: input_logprobs[1:] + output_logprobs
+                proximal_logprobs_t = prefill_output_logprobs
+            except Exception as e:
+                # If recomputation fails, fall back to empty list
+                self.logger.warning(
+                    f"Failed to recompute prefill logprobs: {e}. "
+                    f"Falling back to empty proximal_logprobs_t."
+                )
+                proximal_logprobs_t = []
+
         response = ModelResponse(
             input_tokens=req.input_ids,
             input_images=req.image_data,
             output_tokens=accumulated_output_tokens,
             output_logprobs=accumulated_output_logprobs,
             output_versions=accumulated_versions,
+            proximal_logprobs_t=proximal_logprobs_t,
             stop_reason=stop_reason,
             latency=latency,
             ttft=latency,  # Simplified for non-streaming

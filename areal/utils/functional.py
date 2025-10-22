@@ -134,6 +134,7 @@ def ppo_actor_loss_fn(
     advantages: torch.Tensor,
     eps_clip: float,
     loss_mask: torch.Tensor,
+    proximal_logprobs_t: Optional[torch.Tensor] = None,
     eps_clip_higher: Optional[float] = None,
     c_clip: Optional[float] = None,
     behav_imp_weight_cap: Optional[float] = None,
@@ -145,6 +146,10 @@ def ppo_actor_loss_fn(
 
     When decoupled loss is enabled, proximal_logprobs is the recomputed logp,
     old_logprobs is produced by the inference engine.
+
+    Segment-wise PPO extension:
+    When proximal_logprobs_t is provided, it represents combined prefill+decode logprobs
+    and is used for behavioral KL computation to reduce variance in importance weights.
     """
     loss_mask_count = loss_mask.count_nonzero() or 1
     ratio = torch.where(loss_mask, torch.exp(logprobs - proximal_logprobs), 0)
@@ -166,8 +171,21 @@ def ppo_actor_loss_fn(
         pg_loss = torch.min(pg_loss, pg_loss3)
     else:
         dual_clip_mask = torch.zeros_like(clip_mask)
-    behav_kl = proximal_logprobs - old_logprobs
+
+    # Segment-wise PPO: Use proximal_logprobs_t for behavioral KL if available
+    if proximal_logprobs_t is not None:
+        # Use segment-wise logprobs for behavioral KL
+        behav_kl = proximal_logprobs_t - old_logprobs
+        # Keep decoupled KL using base proximal logprobs
+        behav_kl_decoupled = proximal_logprobs - old_logprobs
+    else:
+        # Fallback to standard behavioral KL
+        behav_kl = proximal_logprobs - old_logprobs
+        behav_kl_decoupled = behav_kl
+
     behav_imp_weight = behav_kl.exp()
+    behav_imp_weight_decoupled = behav_kl_decoupled.exp()
+
     behav_mask = (
         (behav_imp_weight <= behav_imp_weight_cap).logical_and(loss_mask)
         if behav_imp_weight_cap is not None
@@ -191,6 +209,9 @@ def ppo_actor_loss_fn(
         stat["behave_imp_weight"] = behav_imp_weight
         stat["behave_approx_kl"] = behav_kl
         stat["behave_mask"] = behav_mask
+        if proximal_logprobs_t is not None:
+            stat["behave_imp_weight_decoupled"] = behav_imp_weight_decoupled
+            stat["behave_kl_decoupled"] = behav_kl_decoupled
     return pg_loss, stat
 
 

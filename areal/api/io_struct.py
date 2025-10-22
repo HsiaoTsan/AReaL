@@ -43,6 +43,8 @@ class ModelResponse:
     output_logprobs: List[float] = field(default_factory=list)
     output_versions: List[int] = field(default_factory=list)
     stop_reason: Literal["length", "stop", "interrupt"] = "stop"
+    # segment-wise PPO: combined prefill+decode logprobs
+    proximal_logprobs_t: List[float] = field(default_factory=list)
     # tokenizer is used for encode-decode in the inference engine
     tokenizer: Optional[PreTrainedTokenizerFast] = None
 

@@ -305,6 +305,12 @@ def grpo_loss_fn(
     loss_mask = input_data["loss_mask"].bool()
     prox_logp = input_data["prox_logp"]
 
+    # Segment-wise PPO: Extract proximal_logprobs_t if available
+    proximal_logprobs_t = input_data.get("proximal_logprobs_t", None)
+    if proximal_logprobs_t is not None:
+        # Apply same roll(-1) transformation for next-token prediction alignment
+        proximal_logprobs_t = torch.roll(proximal_logprobs_t, shifts=-1, dims=-1)
+
     logprobs, entropy = gather_logprobs_entropy(
         logits, torch.roll(input_ids, shifts=-1, dims=-1), temperature
     )
@@ -318,6 +324,7 @@ def grpo_loss_fn(
         loss_mask=loss_mask,
         c_clip=c_clip,
         proximal_logprobs=prox_logp,
+        proximal_logprobs_t=proximal_logprobs_t,
         behav_imp_weight_cap=behav_imp_weight_cap,
     )
 
@@ -347,6 +354,13 @@ def grpo_loss_fn(
             behave_approx_kl=stat["behave_approx_kl"],
             denominator="unclipped_behave_tokens",
         )
+        # Segment-wise PPO: Log decoupled stats if available
+        if "behave_imp_weight_decoupled" in stat:
+            stats_tracker.stat(
+                behave_imp_weight_decoupled=stat["behave_imp_weight_decoupled"],
+                behave_kl_decoupled=stat["behave_kl_decoupled"],
+                denominator="unclipped_behave_tokens",
+            )
     vocab_min_logits = logits.detach().min(-1).values.float()
     vocab_max_logits = logits.detach().max(-1).values.float()
     stats_tracker.stat(
