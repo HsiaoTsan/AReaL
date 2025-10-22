@@ -7,6 +7,7 @@ import aiofiles
 import aiofiles.os
 import colorama
 import torch
+from tensordict import TensorDict
 from transformers import PreTrainedTokenizerFast
 
 from areal.api.cli_args import GenerationHyperparameters
@@ -126,7 +127,8 @@ class RLVRWorkflow(RolloutWorkflow):
             if proximal_logprobs_t_padded:
                 res["proximal_logprobs_t"] = torch.tensor(proximal_logprobs_t_padded).unsqueeze(0)
 
-            results.append(res)
+            # Create TensorDict with batch_size like areal-tmp
+            results.append(TensorDict(res, batch_size=[1]))
 
         if self.dump_dir is not None:
             dump_path = os.path.join(self.dump_dir, str(version))

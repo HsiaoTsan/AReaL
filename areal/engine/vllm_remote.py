@@ -142,6 +142,7 @@ class RemotevLLMEngine(InferenceEngine):
         input_ids: List[int],
         prompt_len: int,
         image_data: Optional[List[Any]] = None,
+        rid=None
     ) -> List[float]:
         """Recompute prefill logprobs for the output segment using vLLM.
 
@@ -158,15 +159,18 @@ class RemotevLLMEngine(InferenceEngine):
             A list of length len(input_ids) - prompt_len containing
             prefill-computed logprobs for each output token.
         """
-        server_addr = self.choose_server()
+        server_addr = self.rid_to_address.get(rid, self.addresses[self.server_idx])
         url = f"http://{server_addr}/v1/completions"
 
         payload = {
             "prompt": input_ids,
+            "top_p": 1.0,
+            "top_k": -1,
             "max_tokens": 0,  # Only do prefill, no generation
             "temperature": 0.0,
-            "logprobs": 0,
+            "logprobs": 1,
             "return_tokens_as_token_ids": True,
+            "echo":True,
             "stream": False,
         }
 
@@ -190,6 +194,56 @@ class RemotevLLMEngine(InferenceEngine):
         output_logprobs = token_logprobs[prompt_len:]
 
         return output_logprobs
+
+    def recompute_output_logprobs_sync(
+        self,
+        input_ids: List[int],
+        start_index: int,
+        image_data: Optional[List[Any]] = None,
+    ) -> List[float]:
+        """Synchronously recompute output logprobs starting from a given index.
+
+        This method is used by the workflow executor to recompute logprobs for
+        output tokens that were generated with an older model version.
+
+        Args:
+            input_ids: Full sequence (prompt + all outputs so far)
+            start_index: Index to start recomputing from (typically first_output_idx - 1)
+            image_data: Optional VLM images
+
+        Returns:
+            List of recomputed logprobs starting from start_index+1
+        """
+        # Use the same vLLM server for consistency
+        server_addr = self.addresses[self.server_idx]
+        url = f"http://{server_addr}/v1/completions"
+
+        payload = {
+            "prompt": input_ids,
+            "top_p": 1.0,
+            "top_k": -1,
+            "max_tokens": 0,  # Only do prefill, no generation
+            "temperature": 0.0,
+            "logprobs": 1,
+            "return_tokens_as_token_ids": True,
+            "echo": True,
+            "stream": False,
+        }
+
+        res = requests.post(url, json=payload, timeout=self.config.request_timeout)
+        res.raise_for_status()
+        result = res.json()
+
+        # Extract logprobs from response
+        meta_info = result["choices"][0]
+        token_logprobs = meta_info["logprobs"]["token_logprobs"]
+
+        # Return logprobs starting from start_index + 1
+        # The logprob at position i is for predicting token i
+        if start_index + 1 >= len(token_logprobs):
+            return []
+
+        return token_logprobs[start_index + 1:]
 
     async def agenerate(self, req: ModelRequest) -> ModelResponse:
         """Async version of generate using aiohttp."""
@@ -222,7 +276,7 @@ class RemotevLLMEngine(InferenceEngine):
             "temperature": 0.0 if gconfig.greedy else gconfig.temperature,
             "stop_token_ids": stop_token_ids,
             "return_tokens_as_token_ids": True,
-            "logprobs": 0,
+            "logprobs": 1,
             "stream": False,
         }
 
@@ -410,13 +464,13 @@ class RemotevLLMEngine(InferenceEngine):
         data: Dict[str, Any],
         workflow: Optional[RolloutWorkflow] = None,
         workflow_builder: Optional[Callable] = None,
-        should_accept: Callable | None = None,
+        # should_accept: Callable | None = None,
     ) -> None:
         return self.workflow_executor.submit(
             data,
             workflow=workflow,
             workflow_builder=workflow_builder,
-            should_accept=should_accept,
+            # should_accept=should_accept,
         )
 
     def wait(self, count: int, timeout: float | None = None) -> Dict[str, Any]:

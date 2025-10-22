@@ -1,21 +1,20 @@
 experiment_name: boba_ppo_vllm
 trial_name: trial0
 
-cluster:
-  n_nodes: 2
-  n_gpus_per_node: 8
-  cluster_name: na132
-  fileroot: /tmp/areal/experiments
-  name_resolve:
-    type: nfs
-    nfs_record_root: /tmp/areal/name_resolve
-
 seed: 1
 total_train_epochs: 10
-total_train_steps: null
 tokenizer_path: ${actor.path}
-allocation_mode: vllm.d4p1t2+d8p1t1
 async_training: true
+
+cluster:
+  n_nodes: 1
+  n_gpus_per_node: 8
+  fileroot: /home/ubuntu/data/brucewu/areal/experiments
+  name_resolve:
+    type: nfs
+    nfs_record_root: /home/ubuntu/data/brucewu/areal//name_resolve
+
+allocation_mode: vllm.d3p1t2+d2p1t1
 
 rollout:
   experiment_name: ${experiment_name}
@@ -27,22 +26,22 @@ rollout:
   enable_rollout_tracing: true
 
 gconfig:
-  n_samples: 16
+  n_samples: 4
   min_new_tokens: 0
-  max_new_tokens: 30720
+  max_new_tokens: 3000
   greedy: false
   temperature: 1.0
 
 actor:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: Qwen/Qwen2.5-1.5B-Instruct
+  path: /home/ubuntu/data/brucewu/hub/models--deepseek-ai--DeepSeek-R1-Distill-Qwen-1.5B/snapshots/ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562/
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true
   dtype: bfloat16
   mb_spec:
-    max_tokens_per_mb: 32768
+    max_tokens_per_mb: 4096
   optimizer:
     type: adam
     lr: 1e-5
@@ -54,7 +53,6 @@ actor:
     gradient_clipping: 1.0
     warmup_steps_proportion: 0.001
   backend: fsdp
-
   group_size: ${gconfig.n_samples}
   eps_clip: 0.4
   temperature: ${gconfig.temperature}
@@ -65,6 +63,11 @@ actor:
   recompute_logprob: true
   use_decoupled_loss: true
   behav_imp_weight_cap: 5.0
+  dynamic_sampling: false
+  adv_norm:
+    mean_level: batch
+    std_level: batch
+  max_new_tokens: ${gconfig.max_new_tokens}
 
 ref:
   experiment_name: ${experiment_name}
@@ -74,9 +77,10 @@ ref:
   disable_dropout: true
   dtype: ${actor.dtype}
   mb_spec:
-    max_tokens_per_mb: 32768
+    max_tokens_per_mb: 4096
   optimizer: null
   backend: fsdp
+  
 
 # vLLM
 vllm:
@@ -84,13 +88,13 @@ vllm:
   seed: ${seed}
   skip_tokenizer_init: false
   dtype: ${actor.dtype}
-  max_model_len: 32768
+  max_model_len: 4096
   gpu_memory_utilization: 0.9
 
 # datasets
 train_dataset:
-  path: inclusionAI/AReaL-boba-Data
-  batch_size: 512
+  path: /home/ubuntu/data/brucewu/hub/datasets--inclusionAI--AReaL-boba-Data/snapshots/1799c00be3f1216ab55a5cae3562d654dbfd7d82/AReaL-boba-106k.jsonl
+  batch_size: 32
   shuffle: true
   pin_memory: true
   type: rl
@@ -131,10 +135,10 @@ stats_logger:
 
 # Launcher
 launcher:
-  inference_server_cpus_per_gpu: 15
-  inference_server_mem_per_gpu: 153600
-  trainer_cpus_per_gpu: 15
-  trainer_mem_per_gpu: 153600
+  inference_server_cpus_per_gpu: 4
+  inference_server_mem_per_gpu: 32768
+  trainer_cpus_per_gpu: 4
+  trainer_mem_per_gpu: 32768
   inference_server_env_vars: 'VLLM_USE_V1=1,TASK_QUEUE_ENABLE=2,HCCL_EXEC_TIMEOUT=14400,HCCL_OP_EXPANSION_MODE=HOST,VLLM_ALLOW_LONG_MAX_MODEL_LEN=1,ACL_DEVICE_SYNC_TIMEOUT=14400,HCCL_EVENT_TIMEOUT=14500,HCCL_ASYNC_ERROR_HANDLING=0,ACL_STREAM_TIMEOUT=14500000,HCCL_CONNECT_TIMEOUT=7200'
   trainer_env_vars: 'TASK_QUEUE_ENABLE=2,HCCL_EXEC_TIMEOUT=14400,HCCL_OP_EXPANSION_MODE=HOST,ACL_DEVICE_SYNC_TIMEOUT=14400,HCCL_EVENT_TIMEOUT=14500,HCCL_ASYNC_ERROR_HANDLING=0,ACL_STREAM_TIMEOUT=14500000,HCCL_CONNECT_TIMEOUT=7200,PYTORCH_NPU_ALLOC_CONF=expandable_segments:True'
   slurm:
