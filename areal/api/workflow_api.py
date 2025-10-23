@@ -52,17 +52,34 @@ def _extract_version(value: Any) -> Optional[int]:
 ROLLOUT_POLL_WAIT_TIME = 0.05
 
 
-def _ensure_recompute_key(td: TensorDict) -> None:
-    """Ensure the recompute tracking key exists with batch-aligned shape."""
-    if not isinstance(td, TensorDict):
+def _ensure_recompute_key(td) -> None:
+    """Ensure the recompute tracking key exists with batch-aligned shape.
+
+    Works with both TensorDict and regular dict objects.
+    """
+    if td is None:
         return
-    if RECOMPUTE_VERSION_KEY in td.keys():
+
+    # Check if key already exists
+    if RECOMPUTE_VERSION_KEY in td.keys() if hasattr(td, 'keys') else RECOMPUTE_VERSION_KEY in td:
         return
-    if "versions" not in td.keys():
+
+    # Check if versions field exists
+    if "versions" not in (td.keys() if hasattr(td, 'keys') else td):
         return
-    versions = td.get("versions")
+
+    # Get versions field (works for both dict and TensorDict)
+    versions = td.get("versions") if hasattr(td, 'get') else td["versions"]
+    if versions is None:
+        return
+
     default_value = torch.full_like(versions[:, :1], -1, dtype=torch.int64)
-    td.set(RECOMPUTE_VERSION_KEY, default_value)
+
+    # Set key (handle both dict and TensorDict)
+    if isinstance(td, TensorDict):
+        td.set(RECOMPUTE_VERSION_KEY, default_value)
+    else:
+        td[RECOMPUTE_VERSION_KEY] = default_value
 
 
 class RolloutWorkflow:
@@ -570,7 +587,11 @@ class WorkflowExecutor:
                         patched_value = torch.full_like(
                             versions[:, :1], int(current_ver), dtype=torch.int64
                         )
-                        td.set(RECOMPUTE_VERSION_KEY, patched_value)
+                        # Handle both dict and TensorDict
+                        if isinstance(td, TensorDict):
+                            td.set(RECOMPUTE_VERSION_KEY, patched_value)
+                        else:
+                            td[RECOMPUTE_VERSION_KEY] = patched_value
                         if diff_entries:
                             logger.info(
                                 f"[RecomputeDiff] sample#{idx} entries={diff_entries}"

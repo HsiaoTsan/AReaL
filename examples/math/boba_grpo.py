@@ -76,6 +76,8 @@ def boba_reward_fn(
     for sol in solutions:
         x = process_results(completions, sol)
         label = label or x[0]
+        if label:  # Early exit if already found a match
+            break
     return label
 
 
@@ -156,6 +158,8 @@ def main(args):
         ),
         get_input_ids_fn=get_input_ids_fn,
         data_extract_prompt_fn=data_extract_prompt_fn,
+        reward_timeout=60,  # Increased from default 30s to 60s
+        reward_max_workers=64,  # Increased to match allocated CPU cores (224 total available)
     )
 
     # Run training.

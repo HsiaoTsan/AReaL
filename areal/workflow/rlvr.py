@@ -46,6 +46,8 @@ class RLVRWorkflow(RolloutWorkflow):
         dump_dir: str | None = None,
         get_input_ids_fn: Callable = default_get_input_ids_fn,
         data_extract_prompt_fn: Callable = default_data_extract_prompt_fn,
+        reward_timeout: float = 30,  # Increased from default 15s
+        reward_max_workers: int = 16,  # More workers for concurrent processing
     ):
         self.reward_fn = reward_fn
         self.gconfig = gconfig
@@ -53,7 +55,11 @@ class RLVRWorkflow(RolloutWorkflow):
         self.enable_thinking = enable_thinking
         self.dump_dir = dump_dir
         self.rollout_stat_scope = rollout_stat_scope
-        self.async_reward_fn = AsyncRewardWrapper(reward_fn)
+        self.async_reward_fn = AsyncRewardWrapper(
+            reward_fn,
+            timeout_seconds=reward_timeout,
+            max_workers=reward_max_workers
+        )
         self.get_input_ids_fn = get_input_ids_fn
         self.data_extract_prompt_fn = data_extract_prompt_fn
         if self.dump_dir is not None and not os.path.exists(self.dump_dir):
@@ -106,11 +112,13 @@ class RLVRWorkflow(RolloutWorkflow):
 
             # Segment-wise PPO: Include proximal_logprobs_t if available
             # Pad with zeros for prompt tokens, similar to AReaL-segment approach
-            proximal_logprobs_t_padded = (
-                [0.0] * resp.input_len + resp.proximal_logprobs_t
-                if resp.proximal_logprobs_t
-                else []
-            )
+            # IMPORTANT: Always include this field (even if all zeros) to ensure
+            # all TensorDicts have the same keys for concat_padded_tensors
+            if resp.proximal_logprobs_t:
+                proximal_logprobs_t_padded = [0.0] * resp.input_len + resp.proximal_logprobs_t
+            else:
+                # If not available, use zeros for entire sequence
+                proximal_logprobs_t_padded = [0.0] * len(seq)
 
             res = dict(
                 # unsqueeze to add an additional batch dimension
@@ -121,11 +129,9 @@ class RLVRWorkflow(RolloutWorkflow):
                 attention_mask=torch.ones(len(seq), dtype=torch.bool).unsqueeze(0),
                 # reward
                 rewards=torch.tensor([float(reward)]),
+                # Always include proximal_logprobs_t (required for concatenation)
+                proximal_logprobs_t=torch.tensor(proximal_logprobs_t_padded).unsqueeze(0),
             )
-
-            # Only add proximal_logprobs_t if it's non-empty
-            if proximal_logprobs_t_padded:
-                res["proximal_logprobs_t"] = torch.tensor(proximal_logprobs_t_padded).unsqueeze(0)
 
             # Create TensorDict with batch_size like areal-tmp
             results.append(TensorDict(res, batch_size=[1]))
