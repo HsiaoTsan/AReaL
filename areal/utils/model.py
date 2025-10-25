@@ -47,7 +47,7 @@ def disable_dropout_in_model(model: torch.nn.Module) -> None:
 
 
 def get_model_update_meta(config):
-    if config.weight_update_mode == "disk":
+    if config.actor.weight_update_mode == "disk":
         return WeightUpdateMeta.from_disk(
             config.experiment_name, config.trial_name, config.cluster.fileroot
         )
