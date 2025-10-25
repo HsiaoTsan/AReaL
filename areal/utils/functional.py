@@ -178,6 +178,7 @@ def ppo_actor_loss_fn(
     eps_clip_higher: Optional[float] = None,
     c_clip: Optional[float] = None,
     behav_imp_weight_cap: Optional[float] = None,
+    importance_sampling_level: str = "token",
 ) -> Tuple[torch.Tensor, Dict]:
     """
     When decoupled loss is disabled:
@@ -186,9 +187,36 @@ def ppo_actor_loss_fn(
 
     When decoupled loss is enabled, proximal_logprobs is the recomputed logp,
     old_logprobs is produced by the inference engine.
+
+    Args:
+        importance_sampling_level: Level at which to compute importance sampling ratios.
+            - 'token': Per-token ratios (standard PPO)
+            - 'sequence': Sequence-level geometric mean of per-token ratios (GSPO)
     """
     loss_mask_count = loss_mask.count_nonzero() or 1
-    ratio = torch.where(loss_mask, torch.exp(logprobs - proximal_logprobs), 0)
+
+    if importance_sampling_level == "sequence":
+        # GSPO: Compute sequence-level geometric mean of probability ratios
+        # Geometric mean = exp(mean(log(ratios))) = exp(mean(log_ratio))
+        # Input shape: [batch_size, seq_len]
+        log_ratio = logprobs - proximal_logprobs
+
+        # Compute mean log ratio over sequence length for each sample
+        seq_log_ratio_mean = torch.where(loss_mask, log_ratio, 0.0).sum(dim=1) / (
+            loss_mask.sum(dim=1).clamp(min=1)
+        )
+        # Broadcast back to original shape: each sequence gets its own geometric mean ratio
+        ratio = torch.exp(seq_log_ratio_mean.unsqueeze(1).expand_as(log_ratio))
+        # Apply mask
+        ratio = torch.where(loss_mask, ratio, 0.0)
+    elif importance_sampling_level == "token":
+        # Standard PPO: per-token ratio
+        ratio = torch.where(loss_mask, torch.exp(logprobs - proximal_logprobs), 0)
+    else:
+        raise ValueError(
+            f"Invalid importance_sampling_level: {importance_sampling_level}. "
+            "Must be 'token' or 'sequence'."
+        )
 
     clipped_ratio = torch.clamp(
         ratio,

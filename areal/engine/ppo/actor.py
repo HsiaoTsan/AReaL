@@ -264,6 +264,7 @@ class PPOActor:
                     eps_clip_higher=self.config.eps_clip_higher,
                     c_clip=self.config.c_clip,
                     behav_imp_weight_cap=self.config.behav_imp_weight_cap,
+                    importance_sampling_level=self.config.importance_sampling_level,
                 ),
                 loss_weight_fn=lambda x: x["loss_mask"].count_nonzero(),
             )
@@ -318,6 +319,7 @@ def grpo_loss_fn(
     eps_clip_higher: float | None,
     c_clip: float | None,
     behav_imp_weight_cap: float | None,
+    importance_sampling_level: str = "token",
 ):
     """Loss function for actor step, all inputs should be splitted into
     pipeline micro batches, returns loss and logging stats."""
@@ -344,6 +346,7 @@ def grpo_loss_fn(
         c_clip=c_clip,
         proximal_logprobs=prox_logp,
         behav_imp_weight_cap=behav_imp_weight_cap,
+        importance_sampling_level=importance_sampling_level,
     )
 
     # Log training statistics
