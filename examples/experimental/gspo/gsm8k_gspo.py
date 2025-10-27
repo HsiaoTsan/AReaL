@@ -1,3 +1,5 @@
+# GSM8K GSPO
+
 import os
 import sys
 from copy import deepcopy
@@ -10,6 +12,7 @@ from areal.api.io_struct import FinetuneSpec, StepInfo, WeightUpdateMeta
 from areal.dataset import get_custom_dataset
 from areal.engine.ppo.actor import FSDPPPOActor
 from areal.engine.sglang_remote import RemoteSGLangEngine
+from areal.engine.vllm_remote import RemotevLLMEngine
 from areal.platforms import current_platform
 from areal.utils import seeding, stats_tracker
 from areal.utils.data import (
@@ -47,6 +50,13 @@ def main(args):
     actor = FSDPPPOActor(config=config.actor)
     actor.create_process_group(parallel_strategy=parallel_strategy)
 
+    world_size = actor.data_parallel_world_size
+    if config.train_dataset.batch_size < world_size:
+        raise ValueError(
+            f"batch size({config.train_dataset.batch_size}) "
+            f"must larger or equal than world_size({world_size})!"
+        )
+
     # Create dataset and dataloaders
     train_dataset = get_custom_dataset(
         split="train", dataset_config=config.train_dataset, tokenizer=tokenizer
@@ -74,15 +84,25 @@ def main(args):
     )
 
     # Initialize inference engine
-    rollout = RemoteSGLangEngine(config.rollout)
+    if allocation_mode.gen_backend == "vllm":
+        rollout = RemotevLLMEngine(config.rollout)
+    elif allocation_mode.gen_backend == "sglang":
+        rollout = RemoteSGLangEngine(config.rollout)
     rollout.initialize(train_data_parallel_size=parallel_strategy.dp_size)
-    eval_rollout = RemoteSGLangEngine(deepcopy(config.rollout))
+    
+
+    if allocation_mode.gen_backend == "vllm":
+        eval_rollout = RemotevLLMEngine(deepcopy(config.rollout))
+    elif allocation_mode.gen_backend == "sglang":
+        eval_rollout = RemoteSGLangEngine(deepcopy(config.rollout))
+
     # NOTE: eval does not have any offpolicyness control
     eval_rollout.config.max_head_offpolicyness = int(1e12)
     eval_rollout.initialize()
 
     weight_update_meta = WeightUpdateMeta.from_fsdp_xccl(allocation_mode)
 
+    # Initialize train engine
     actor.initialize(None, ft_spec)
     actor.connect_engine(rollout, weight_update_meta)
 
@@ -223,8 +243,6 @@ def main(args):
 
             def evaluate_fn():
                 if actor.is_data_parallel_head():
-                    # Stats are logged in workflow
-                    # and will be exported later
                     cnt = 0
                     for data in valid_dataloader:
                         for item in data:
