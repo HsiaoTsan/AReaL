@@ -100,7 +100,10 @@ def main(args):
     eval_rollout.config.max_head_offpolicyness = int(1e12)
     eval_rollout.initialize()
 
-    weight_update_meta = WeightUpdateMeta.from_fsdp_xccl(allocation_mode)
+    # weight_update_meta = WeightUpdateMeta.from_fsdp_xccl(allocation_mode)
+    weight_update_meta = WeightUpdateMeta.from_disk(
+            config.experiment_name, config.trial_name, config.cluster.fileroot
+        )
 
     # Initialize train engine
     actor.initialize(None, ft_spec)
