@@ -190,7 +190,7 @@ def ppo_actor_loss_fn(
 
     Args:
         importance_sampling_level: Level at which to compute importance sampling ratios.
-            - 'token': Per-token ratios (standard PPO)
+            - 'token': Per-token ratios
             - 'sequence': Sequence-level geometric mean of per-token ratios (GSPO)
     """
     loss_mask_count = loss_mask.count_nonzero() or 1
@@ -198,17 +198,30 @@ def ppo_actor_loss_fn(
     if importance_sampling_level == "sequence":
         # GSPO: Compute sequence-level geometric mean of probability ratios
         # Geometric mean = exp(mean(log(ratios))) = exp(mean(log_ratio))
-        # Input shape: [batch_size, seq_len]
         log_ratio = logprobs - proximal_logprobs
 
-        # Compute mean log ratio over sequence length for each sample
-        seq_log_ratio_mean = torch.where(loss_mask, log_ratio, 0.0).sum(dim=1) / (
-            loss_mask.sum(dim=1).clamp(min=1)
-        )
-        # Broadcast back to original shape: each sequence gets its own geometric mean ratio
-        ratio = torch.exp(seq_log_ratio_mean.unsqueeze(1).expand_as(log_ratio))
-        # Apply mask
-        ratio = torch.where(loss_mask, ratio, 0.0)
+        # Handle both 1D (packed) and 2D (padded) tensor shapes
+        if log_ratio.ndim == 1:
+            # For 1D tensors (packed sequences), treat as single sequence
+            # Input shape: [total_tokens]
+            seq_log_ratio_mean = torch.where(loss_mask, log_ratio, 0.0).sum() / (
+                loss_mask.sum().clamp(min=1)
+            )
+            # All tokens in the sequence get the same geometric mean ratio
+            ratio = torch.exp(seq_log_ratio_mean).expand_as(log_ratio)
+            # Apply mask
+            ratio = torch.where(loss_mask, ratio, 0.0)
+        else:
+            # For 2D tensors (padded sequences)
+            # Input shape: [batch_size, seq_len]
+            # Compute mean log ratio over sequence length for each sample
+            seq_log_ratio_mean = torch.where(loss_mask, log_ratio, 0.0).sum(dim=1) / (
+                loss_mask.sum(dim=1).clamp(min=1)
+            )
+            # Broadcast back to original shape: each sequence gets its own geometric mean ratio
+            ratio = torch.exp(seq_log_ratio_mean.unsqueeze(1).expand_as(log_ratio))
+            # Apply mask
+            ratio = torch.where(loss_mask, ratio, 0.0)
     elif importance_sampling_level == "token":
         # Standard PPO: per-token ratio
         ratio = torch.where(loss_mask, torch.exp(logprobs - proximal_logprobs), 0)
