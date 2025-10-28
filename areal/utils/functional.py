@@ -222,6 +222,11 @@ def ppo_actor_loss_fn(
             ratio = torch.exp(seq_log_ratio_mean.unsqueeze(1).expand_as(log_ratio))
             # Apply mask
             ratio = torch.where(loss_mask, ratio, 0.0)
+
+        # sum token advantages per sequence.
+        # use sum instead of mean because later we divide by total valid tokens.
+        advantages = advantages.sum(dim=1, keepdim=True).expand_as(log_ratio)
+
     elif importance_sampling_level == "token":
         # Standard PPO: per-token ratio
         ratio = torch.where(loss_mask, torch.exp(logprobs - proximal_logprobs), 0)
