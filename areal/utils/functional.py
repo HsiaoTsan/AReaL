@@ -225,7 +225,7 @@ def ppo_actor_loss_fn(
 
         # sum token advantages per sequence.
         # use sum instead of mean because later we divide by total valid tokens.
-        advantages = advantages.sum(dim=1, keepdim=True).expand_as(log_ratio)
+        advantages = advantages.sum(dim=-1, keepdim=True).expand_as(log_ratio)
 
     elif importance_sampling_level == "token":
         # Standard PPO: per-token ratio
