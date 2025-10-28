@@ -1,4 +1,4 @@
-experiment_name: gsm8k_gspo
+experiment_name: gsm8k-gspo
 trial_name: trial0
 
 seed: 1
@@ -9,10 +9,10 @@ async_training: true
 cluster:
   n_nodes: 2
   n_gpus_per_node: 8
-  fileroot: /tmp/areal/experiments
+  fileroot: /data/areal/experiments
   name_resolve:
     type: nfs
-    nfs_record_root: /tmp/areal/name_resolve
+    nfs_record_root: /data/areal/name_resolve
 
 allocation_mode: vllm.d4p1t2+d8p1t1
 
@@ -44,8 +44,8 @@ actor:
     max_tokens_per_mb: 32768
   optimizer:
     type: adam
-    lr: 1.70e-5
-    weight_decay: 0.017
+    lr: 1e-5
+    weight_decay: 0.01
     beta1: 0.9
     beta2: 0.999
     eps: 1e-8
