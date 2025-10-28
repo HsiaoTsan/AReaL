@@ -27,18 +27,30 @@ actor:
 
 ```bash
 # Run GSPO training on GSM8K
-python examples/experimental/gspo/gsm8k_gspo.py --config examples/experimental/gspo/gsm8k_gspo.yaml
+python3 -m areal.launcher.local examples/experimental/gspo/gsm8k_gspo.py --config examples/experimental/gspo/gsm8k_gspo.yaml
 ```
+
+
 
 ## Configuration
 
-The example configuration (`gsm8k_gspo.yaml`) includes:
+The example configuration (`gsm8k_gspo.yaml`) specifically includes:
 
 - **importance_sampling_level: sequence** - Enables GSPO algorithm (sequence-level importance sampling)
-- **group_size: 4** - Number of sequences per group
-- **dynamic_sampling: true** - Filters out groups with identical rewards
-- **use_decoupled_loss: true** - Uses decoupled PPO loss for off-policy correction
-- **behav_imp_weight_cap: 5.0** - Caps behavioral importance weights
+
+Therefore, you may also plug in such sequence level importance sampling to any other XXPO algorithms by simply adding the following line after the running command:
+
+```
++actor.importance_sampling_level=sequence
+```
+
+For example, you can plug it into GRPO like this:
+```
+python3 -m areal.launcher.local examples/math/gsm8k_grpo.py --config examples/math/gsm8k_grpo.yaml +actor.importance_sampling_level=sequence
+```
+
+Please note the plus sign (``+``) is mandatory when the key ``importance_sampling_level`` is not in the yaml file.
+
 
 ## Implementation Details
 
