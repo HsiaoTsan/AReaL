@@ -91,6 +91,10 @@ dependencies = [
     "dotenv",
     "json5",
 
+    # Infrastructure: Event system and dependency injection
+    "blinker>=1.9",
+    "dependency-injector>=4.48.0",
+
     # Monitoring and logging
     "wandb",
     "tensorboardx",

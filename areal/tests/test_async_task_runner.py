@@ -10,7 +10,27 @@ import time
 
 import pytest
 
-from areal.core.async_task_runner import AsyncTaskRunner
+from areal.core.app_container import app_container
+
+
+def create_runner(max_queue_size=10, **kwargs):
+    """Helper to create AsyncTaskRunner via container.
+
+    Note: Since async_task_runner is a Singleton, this resets the provider
+    to ensure each test gets a fresh runner.
+    """
+    # Reset the singleton to get a fresh instance
+    app_container.async_task_runner.reset()
+    app_container.async_task_input_queue.reset()
+    app_container.async_task_output_queue.reset()
+    app_container.async_task_result_cache.reset()
+
+    # Configure container
+    app_container.config.from_dict({"max_queue_size": max_queue_size, **kwargs})
+
+    # Create runner via container (now with fresh queues)
+    runner = app_container.async_task_runner()
+    return runner
 
 
 class TestAsyncTaskRunnerBasic:
@@ -18,14 +38,14 @@ class TestAsyncTaskRunnerBasic:
 
     def test_initialization_and_shutdown(self):
         """Test that runner can be initialized and shut down cleanly."""
-        runner = AsyncTaskRunner[int](max_queue_size=10)
+        runner = create_runner(max_queue_size=10)
         runner.initialize()
         time.sleep(0.1)  # Allow thread to start
         runner.destroy()
 
     def test_simple_task_submission(self):
         """Test submitting and waiting for a single task."""
-        runner = AsyncTaskRunner[int](max_queue_size=10)
+        runner = create_runner(max_queue_size=10)
         runner.initialize()
 
         async def add(a: int, b: int) -> int:
@@ -41,7 +61,7 @@ class TestAsyncTaskRunnerBasic:
 
     def test_multiple_task_submission(self):
         """Test submitting and waiting for multiple tasks."""
-        runner = AsyncTaskRunner[int](max_queue_size=50)
+        runner = create_runner(max_queue_size=50)
         runner.initialize()
 
         async def compute(x: int) -> int:
@@ -61,7 +81,7 @@ class TestAsyncTaskRunnerBasic:
 
     def test_batch_submission(self):
         """Test batch submission of tasks."""
-        runner = AsyncTaskRunner[str](max_queue_size=50)
+        runner = create_runner(max_queue_size=50)
         runner.initialize()
 
         async def process(text: str) -> str:
@@ -83,7 +103,7 @@ class TestAsyncTaskRunnerBasic:
 
     def test_with_kwargs(self):
         """Test task submission with keyword arguments."""
-        runner = AsyncTaskRunner[int](max_queue_size=10)
+        runner = create_runner(max_queue_size=10)
         runner.initialize()
 
         async def multiply(a: int, b: int) -> int:
@@ -105,7 +125,7 @@ class TestAsyncTaskRunnerPauseResume:
 
     def test_pause_prevents_new_tasks(self):
         """Test that pause prevents new tasks from starting."""
-        runner = AsyncTaskRunner[int](max_queue_size=50)
+        runner = create_runner(max_queue_size=50)
         runner.initialize()
 
         async def slow_task(x: int) -> int:
@@ -137,7 +157,7 @@ class TestAsyncTaskRunnerPauseResume:
 
     def test_resume_allows_tasks(self):
         """Test that resume allows paused tasks to start."""
-        runner = AsyncTaskRunner[int](max_queue_size=50)
+        runner = create_runner(max_queue_size=50)
         runner.initialize()
 
         async def fast_task(x: int) -> int:
@@ -167,7 +187,7 @@ class TestAsyncTaskRunnerTimeout:
 
     def test_timeout_on_insufficient_results(self):
         """Test that wait() times out if not enough results are ready."""
-        runner = AsyncTaskRunner[int](max_queue_size=10)
+        runner = create_runner(max_queue_size=10)
         runner.initialize()
 
         async def slow_task(x: int) -> int:
@@ -183,7 +203,7 @@ class TestAsyncTaskRunnerTimeout:
 
     def test_partial_results_timeout(self):
         """Test timeout when only partial results are available."""
-        runner = AsyncTaskRunner[int](max_queue_size=50)
+        runner = create_runner(max_queue_size=50)
         runner.initialize()
         time.sleep(0.1)  # Give thread time to start
 
@@ -214,7 +234,7 @@ class TestAsyncTaskRunnerConcurrency:
     def test_concurrent_execution(self):
         """Test that tasks execute concurrently, not sequentially."""
         # Use faster polling for this test
-        runner = AsyncTaskRunner[float](
+        runner = create_runner(
             max_queue_size=50,
             poll_wait_time=0.05,
             poll_sleep_time=0.01,  # Very fast polling for this test
@@ -243,7 +263,7 @@ class TestAsyncTaskRunnerConcurrency:
 
     def test_many_concurrent_tasks(self):
         """Test handling many concurrent tasks."""
-        runner = AsyncTaskRunner[int](max_queue_size=200)
+        runner = create_runner(max_queue_size=200)
         runner.initialize()
 
         async def compute(x: int) -> int:
@@ -267,7 +287,7 @@ class TestAsyncTaskRunnerErrorHandling:
 
     def test_queue_full_error(self):
         """Test that submitting to a full queue raises an error."""
-        runner = AsyncTaskRunner[int](max_queue_size=2)
+        runner = create_runner(max_queue_size=2)
         runner.initialize()
 
         async def task(x: int) -> int:
@@ -286,7 +306,7 @@ class TestAsyncTaskRunnerErrorHandling:
 
     def test_task_exception_handling(self):
         """Test that task exceptions are properly handled and don't stop the runner."""
-        runner = AsyncTaskRunner[int](max_queue_size=10)
+        runner = create_runner(max_queue_size=10)
         runner.initialize()
 
         async def failing_task() -> int:
@@ -315,7 +335,7 @@ class TestAsyncTaskRunnerErrorHandling:
 
     def test_shutdown_with_pending_tasks(self):
         """Test clean shutdown with pending tasks."""
-        runner = AsyncTaskRunner[int](max_queue_size=50)
+        runner = create_runner(max_queue_size=50)
         runner.initialize()
 
         async def long_task(x: int) -> int:
@@ -335,7 +355,7 @@ class TestAsyncTaskRunnerQueueSizes:
 
     def test_get_queue_sizes(self):
         """Test that queue sizes can be retrieved."""
-        runner = AsyncTaskRunner[int](max_queue_size=50)
+        runner = create_runner(max_queue_size=50)
         runner.initialize()
 
         async def task(x: int) -> int:
@@ -364,7 +384,7 @@ class TestAsyncTaskRunnerResultOrdering:
 
     def test_result_cache_accumulation(self):
         """Test that results accumulate in cache across multiple wait() calls."""
-        runner = AsyncTaskRunner[int](max_queue_size=50)
+        runner = create_runner(max_queue_size=50)
         runner.initialize()
 
         async def fast_task(x: int) -> int:
@@ -395,7 +415,7 @@ class TestAsyncTaskRunnerResultOrdering:
 
     def test_results_are_shuffled(self):
         """Test that results are returned in random order."""
-        runner = AsyncTaskRunner[int](max_queue_size=50)
+        runner = create_runner(max_queue_size=50)
         runner.initialize()
 
         async def task(x: int) -> int:
@@ -421,7 +441,7 @@ class TestAsyncTaskRunnerWithDifferentTypes:
 
     def test_with_string_results(self):
         """Test with string return types."""
-        runner = AsyncTaskRunner[str](max_queue_size=10)
+        runner = create_runner(max_queue_size=10)
         runner.initialize()
 
         async def concat(a: str, b: str) -> str:
@@ -436,7 +456,7 @@ class TestAsyncTaskRunnerWithDifferentTypes:
 
     def test_with_dict_results(self):
         """Test with dictionary return types."""
-        runner = AsyncTaskRunner[dict](max_queue_size=10)
+        runner = create_runner(max_queue_size=10)
         runner.initialize()
 
         async def create_dict(key: str, value: int) -> dict:
@@ -456,7 +476,7 @@ class TestAsyncTaskRunnerWithDifferentTypes:
 
     def test_with_none_results(self):
         """Test with None return type (e.g., for filtering)."""
-        runner = AsyncTaskRunner[int | None](max_queue_size=20)
+        runner = create_runner(max_queue_size=20)
         runner.initialize()
 
         async def filter_even(x: int) -> int | None:

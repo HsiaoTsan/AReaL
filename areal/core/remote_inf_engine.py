@@ -209,8 +209,23 @@ class RemoteInfEngine:
     """
 
     def __init__(
-        self, config: InferenceEngineConfig, backend: RemoteInfBackendProtocol
+        self,
+        config: InferenceEngineConfig,
+        backend: RemoteInfBackendProtocol,
+        workflow_executor: WorkflowExecutor | None = None,
     ):
+        """Initialize RemoteInfEngine.
+
+        Parameters
+        ----------
+        config : InferenceEngineConfig
+            Configuration for the inference engine.
+        backend : RemoteInfBackendProtocol
+            Backend protocol for handling remote server communication.
+        workflow_executor : WorkflowExecutor, optional
+            Workflow executor for handling rollouts (injected).
+            If None, will be created during initialize().
+        """
         self.config = config
         self.backend = backend
 
@@ -227,7 +242,8 @@ class RemoteInfEngine:
 
         self.lora_initialized = False
 
-        self.workflow_executor: WorkflowExecutor
+        # Workflow executor can be injected or created later
+        self.workflow_executor = workflow_executor
 
     def _wait_for_server(self, address):
         """Wait for a server to become healthy."""
@@ -313,10 +329,18 @@ class RemoteInfEngine:
         self.logger.info("Servers are all ready!")
         self.executor = ProcessPoolExecutor(max_workers=1)
 
-        self.workflow_executor = WorkflowExecutor(
-            config=self.config,
-            inference_engine=self,
-        )
+        # WorkflowExecutor must be injected via constructor or factory method
+        if self.workflow_executor is None:
+            raise RuntimeError(
+                "WorkflowExecutor must be injected. "
+                "Use app_container.create_remote_inf_engine() to create the engine:\n\n"
+                "    from areal.core.app_container import app_container\n"
+                "    engine = app_container.create_remote_inf_engine(config, backend)\n\n"
+                "Or inject manually:\n"
+                "    executor = app_container.create_workflow_executor_for_engine(config, engine)\n"
+                "    engine = RemoteInfEngine(config, backend, workflow_executor=executor)"
+            )
+
         self.workflow_executor.initialize(
             logger=self.logger, train_data_parallel_size=train_data_parallel_size
         )

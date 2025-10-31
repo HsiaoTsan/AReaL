@@ -1,12 +1,13 @@
 import time
 import uuid
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from queue import Queue
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Optional
 
-import sglang as sgl
 import torch.distributed as dist
 from torchdata.stateful_dataloader import StatefulDataLoader
+
+import sglang as sgl
 
 from areal.api.cli_args import InferenceEngineConfig
 from areal.api.engine_api import InferenceEngine
@@ -16,7 +17,6 @@ from areal.api.io_struct import (
     WeightUpdateMeta,
 )
 from areal.api.workflow_api import RolloutWorkflow
-from areal.core import WorkflowExecutor
 from areal.core.workflow_executor import WorkflowExecutor
 from areal.utils import logging, name_resolve, names, pkg_version
 
@@ -38,30 +38,34 @@ SGLangEngine currently only supports single-controller. Cannot be used in SPMD
 
 
 class SGLangEngine(InferenceEngine):
-
     def __init__(
         self,
         config: InferenceEngineConfig,
-        engine_args: Optional[Dict[str, Any]] = None,
+        workflow_executor: WorkflowExecutor | None = None,
+        engine_args: dict[str, Any] | None = None,
     ):
+        """Initialize SGLangEngine.
+
+        Parameters
+        ----------
+        config : InferenceEngineConfig
+            Configuration for the inference engine.
+        workflow_executor : WorkflowExecutor, optional
+            Workflow executor for handling rollouts (injected).
+            If None, a default one will be created during initialize().
+        engine_args : dict, optional
+            Arguments to pass to the SGLang engine.
+        """
         self.config = config
         self.engine_args = engine_args or {}
-
-        qsize = config.queue_size or config.max_concurrent_rollouts * 10
-        self.input_queue = Queue(maxsize=qsize)
-        self.output_queue = Queue(maxsize=qsize)
-        self.result_cache = []
-
         self._version = 0
 
-        self.workflow_executor = WorkflowExecutor(
-            config=config,
-            inference_engine=self,
-        )
+        # Workflow executor can be injected or created later
+        self.workflow_executor = workflow_executor
 
     def initialize(
         self,
-        engine_id: Optional[str] = None,
+        engine_id: str | None = None,
         train_data_parallel_size: int | None = None,
     ):
         if engine_id is None:
@@ -73,6 +77,18 @@ class SGLangEngine(InferenceEngine):
         self.logger = logging.getLogger(f"[SGLang Local Engine Rank {engine_id}]")
 
         self.engine = sgl.Engine(**self.engine_args)
+
+        # WorkflowExecutor must be injected via constructor or factory method
+        if self.workflow_executor is None:
+            raise RuntimeError(
+                "WorkflowExecutor must be injected. "
+                "Use app_container.create_sglang_engine() to create the engine:\n\n"
+                "    from areal.core.app_container import app_container\n"
+                "    engine = app_container.create_sglang_engine(config, engine_args)\n\n"
+                "Or inject manually:\n"
+                "    executor = app_container.create_workflow_executor_for_engine(config, engine)\n"
+                "    engine = SGLangEngine(config, workflow_executor=executor, engine_args=args)"
+            )
 
         self.workflow_executor.initialize(
             logger=self.logger, train_data_parallel_size=train_data_parallel_size
@@ -125,7 +141,6 @@ class SGLangEngine(InferenceEngine):
             stop_reason != "stop"
             and len(accumulated_output_tokens) < gconfig.max_new_tokens
         ):
-
             try:
                 outputs = await self.engine.async_generate(
                     prompt=prompt,
@@ -186,13 +201,13 @@ class SGLangEngine(InferenceEngine):
                 save_timestamp = int(name_resolve.wait(update_name, timeout=120))
                 load_timestamp = time.time_ns()
                 logger.info(
-                    f"Begin update weights from {meta.path}, responded in {(load_timestamp - save_timestamp)/1e6:.2f} ms"
+                    f"Begin update weights from {meta.path}, responded in {(load_timestamp - save_timestamp) / 1e6:.2f} ms"
                 )
                 # Update weights from disk,
                 self.engine.update_weights_from_disk(model_path=meta.path)
 
                 logger.info(
-                    f"Loading weights done in {(time.time_ns() - load_timestamp)/1e6:.2f} ms"
+                    f"Loading weights done in {(time.time_ns() - load_timestamp) / 1e6:.2f} ms"
                 )
                 self.set_version(meta.model_version)
             except Exception as e:
@@ -203,9 +218,9 @@ class SGLangEngine(InferenceEngine):
 
     def submit(
         self,
-        data: Dict[str, Any],
-        workflow: Optional[RolloutWorkflow] = None,
-        workflow_builder: Optional[Callable] = None,
+        data: dict[str, Any],
+        workflow: RolloutWorkflow | None = None,
+        workflow_builder: Callable | None = None,
         should_accept: Callable | None = None,
     ) -> None:
         return self.workflow_executor.submit(
@@ -220,9 +235,9 @@ class SGLangEngine(InferenceEngine):
 
     def rollout_batch(
         self,
-        data: List[Dict[str, Any]],
+        data: list[dict[str, Any]],
         workflow: Optional["RolloutWorkflow"] = None,
-        workflow_builder: Optional[Callable] = None,
+        workflow_builder: Callable | None = None,
         should_accept: Callable | None = None,
     ):
         return self.workflow_executor.rollout_batch(
@@ -235,8 +250,8 @@ class SGLangEngine(InferenceEngine):
     def prepare_batch(
         self,
         dataloader: StatefulDataLoader,
-        workflow: Optional[RolloutWorkflow] = None,
-        workflow_builder: Optional[Callable] = None,
+        workflow: RolloutWorkflow | None = None,
+        workflow_builder: Callable | None = None,
         should_accept: Callable | None = None,
     ):
         return self.workflow_executor.prepare_batch(

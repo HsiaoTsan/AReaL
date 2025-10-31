@@ -17,6 +17,7 @@ from areal.api.workflow_api import RolloutWorkflow
 from areal.core.async_task_runner import AsyncTaskRunner, TaskQueueFullError
 from areal.core.staleness_manager import StalenessManager
 from areal.experimental.openai.types import InteractionWithTokenLogpReward
+from areal.infrastructure import ListCache
 from areal.utils import logging
 from areal.utils.data import concat_padded_tensors, cycle_dataloader
 
@@ -253,8 +254,28 @@ class WorkflowExecutor:
         self,
         config: InferenceEngineConfig,
         inference_engine: InferenceEngine,
+        runner: AsyncTaskRunner[dict[str, Any] | None],
+        pending_results: ListCache[dict[str, Any]],
+        pending_inputs: ListCache[_RolloutTaskInput],
         staleness_manager: StalenessManager | None = None,
     ):
+        """Initialize WorkflowExecutor.
+
+        Parameters
+        ----------
+        config : InferenceEngineConfig
+            Configuration for the workflow executor.
+        inference_engine : InferenceEngine
+            The inference engine to use (injected).
+        runner : AsyncTaskRunner
+            The async task runner for executing workflows (injected).
+        pending_results : ListCache
+            Cache for tracking accepted results (injected).
+        pending_inputs : ListCache
+            Cache for tracking pending inputs (injected).
+        staleness_manager : StalenessManager, optional
+            Manager for staleness control. If None, will be created during initialize().
+        """
         self.max_concurrent_rollouts = (
             config.max_concurrent_rollouts or config.consumer_batch_size
         )
@@ -263,23 +284,17 @@ class WorkflowExecutor:
         self.config = config
         self.inference_engine = inference_engine
 
+        # Injected dependencies
+        self.runner = runner
+        self._pending_results = pending_results
+        self._pending_inputs = pending_inputs
+
         # Use provided staleness manager or create a default one
         # The manager will be properly initialized in initialize()
         self.staleness_manager = staleness_manager
 
-        # Create the generic async task runner
-        qsize = config.queue_size or self.max_concurrent_rollouts * 16
-        self.runner = AsyncTaskRunner[dict[str, Any] | None](
-            max_queue_size=qsize,
-            enable_tracing=config.enable_rollout_tracing,
-        )
-
         # For trajectory format checking
         self._expected_trajectory_keys: set | None = None
-
-        # Cache for tracking inputs and accepted/rejected results
-        self._pending_results: list[dict[str, Any]] = []
-        self._pending_inputs: list[_RolloutTaskInput] = []
 
     def initialize(self, logger=None, train_data_parallel_size: int | None = None):
         """Initialize the workflow executor and start the async task runner.
@@ -322,8 +337,8 @@ class WorkflowExecutor:
                 max_staleness=self.config.max_head_offpolicyness,
             )
 
-        # Initialize the generic async task runner
-        self.runner.initialize(logger=logger)
+        # AsyncTaskRunner is now injected and managed by the container
+        # No need to initialize it here - it will be initialized via InitializableProvider
 
     def destroy(self):
         """Shutdown the workflow executor and clean up resources."""

@@ -21,7 +21,7 @@ from areal.api.cli_args import (
     SGLangConfig,
 )
 from areal.api.io_struct import ModelRequest, ModelResponse
-from areal.experimental.sglang_engine import SGLangEngine
+from areal.core.app_container import app_container
 from areal.utils import seeding
 from areal.utils.hf_utils import load_hf_tokenizer
 from areal.utils.network import find_free_ports
@@ -61,7 +61,7 @@ def build_engine_args():
 async def test_local_sglang_generate():
     seeding.set_random_seed(1, EXPR_NAME)
     config = build_engine_config()
-    engine = SGLangEngine(config, engine_args=build_engine_args())
+    engine = app_container.create_sglang_engine(config, engine_args=build_engine_args())
     engine.initialize(None, None)
 
     req = ModelRequest(
@@ -85,7 +85,7 @@ async def test_local_sglang_generate():
 def test_local_sglang_rollout(n_samples):
     seeding.set_random_seed(1, EXPR_NAME)
     config = build_engine_config(max_concurrent_rollouts=2, consumer_batch_size=2)
-    engine = SGLangEngine(config, engine_args=build_engine_args())
+    engine = app_container.create_sglang_engine(config, engine_args=build_engine_args())
     engine.initialize(None, None)
 
     gconfig = GenerationHyperparameters(
@@ -115,7 +115,7 @@ def test_local_sglang_rollout(n_samples):
 def test_local_sglang_staleness_control(bs, ofp, n_samples):
     seeding.set_random_seed(1, EXPR_NAME)
     config = build_engine_config(consumer_batch_size=bs, max_head_offpolicyness=ofp)
-    engine = SGLangEngine(config, engine_args=build_engine_args())
+    engine = app_container.create_sglang_engine(config, engine_args=build_engine_args())
     engine.initialize(None, None)
 
     gconfig = GenerationHyperparameters(

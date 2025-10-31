@@ -19,6 +19,8 @@ from typing import Generic, TypeVar
 
 import uvloop
 
+from areal.infrastructure import FilterableQueue, ListCache
+
 # Type variable for generic result types
 T = TypeVar("T")
 
@@ -85,10 +87,12 @@ class AsyncTaskRunner(Generic[T]):
 
     Attributes
     ----------
-    input_queue : queue.Queue
+    input_queue : FilterableQueue
         Thread-safe queue for incoming task submissions.
-    output_queue : queue.Queue
+    output_queue : FilterableQueue
         Thread-safe queue for completed task results.
+    result_cache : ListCache
+        Thread-safe list cache for storing results.
     exiting : threading.Event
         Signal to request thread shutdown.
     paused : threading.Event
@@ -147,6 +151,9 @@ class AsyncTaskRunner(Generic[T]):
 
     def __init__(
         self,
+        input_queue: FilterableQueue[_TaskInput[T]],
+        output_queue: FilterableQueue[_TimedResult[T]],
+        result_cache: ListCache[_TimedResult[T]],
         max_queue_size: int,
         poll_wait_time: float = DEFAULT_POLL_WAIT_TIME,
         poll_sleep_time: float = DEFAULT_POLL_SLEEP_TIME,
@@ -156,6 +163,12 @@ class AsyncTaskRunner(Generic[T]):
 
         Parameters
         ----------
+        input_queue : FilterableQueue
+            Queue for incoming task submissions (injected).
+        output_queue : FilterableQueue
+            Queue for completed task results (injected).
+        result_cache : ListCache
+            Cache for storing results (injected).
         max_queue_size : int
             Maximum size for input and output queues.
         poll_wait_time : float, optional
@@ -167,6 +180,12 @@ class AsyncTaskRunner(Generic[T]):
         enable_tracing : bool, optional
             Enable detailed logging. Default is False.
         """
+        # Injected dependencies
+        self.input_queue = input_queue
+        self.output_queue = output_queue
+        self.result_cache = result_cache
+
+        # Configuration
         self.max_queue_size = max_queue_size
         self.poll_wait_time = poll_wait_time
         self.poll_sleep_time = poll_sleep_time
@@ -175,17 +194,6 @@ class AsyncTaskRunner(Generic[T]):
         # Thread control
         self.exiting = threading.Event()
         self.paused = threading.Event()
-
-        # Queues for task management
-        self.input_queue: queue.Queue[_TaskInput[T]] = queue.Queue(
-            maxsize=max_queue_size
-        )
-        self.output_queue: queue.Queue[_TimedResult[T]] = queue.Queue(
-            maxsize=max_queue_size
-        )
-
-        # Cache for results to support wait() with arbitrary counts
-        self.result_cache: list[_TimedResult[T]] = []
 
         # Thread exception handling
         self._thread_exception_lock = threading.Lock()
