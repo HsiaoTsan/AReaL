@@ -599,6 +599,18 @@ class RemoteInfEngine:
         """
         assert meta.type == "disk"
 
+        # Fire PRE_WEIGHT_UPDATE event
+        try:
+            from areal.infrastructure import WorkflowEvents, get_event_bus
+
+            bus = get_event_bus()
+            bus.send(
+                WorkflowEvents.PRE_WEIGHT_UPDATE,
+                sender=self,
+            )
+        except Exception as e:
+            self.logger.warning(f"Failed to fire PRE_WEIGHT_UPDATE event: {e}")
+
         tik = time.perf_counter()
 
         # Use ProcessPool to bypass python GIL for running async coroutines
@@ -631,6 +643,18 @@ class RemoteInfEngine:
             if meta.use_lora:
                 self.lora_initialized = True
             shutil.rmtree(meta.path, ignore_errors=True)
+
+            # Fire POST_WEIGHT_UPDATE event
+            try:
+                from areal.infrastructure import WorkflowEvents, get_event_bus
+
+                bus = get_event_bus()
+                bus.send(
+                    WorkflowEvents.POST_WEIGHT_UPDATE,
+                    sender=self,
+                )
+            except Exception as e:
+                self.logger.warning(f"Failed to fire POST_WEIGHT_UPDATE event: {e}")
 
         fut.add_done_callback(callback)
 

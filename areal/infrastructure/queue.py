@@ -333,6 +333,116 @@ class FilterableQueue(Generic[T]):
             self.filters.clear()
             logger.debug(f"Queue '{self.name}': Cleared all filters")
 
+    def scan(self, predicate: Callable[[T], bool] | None = None) -> list[T]:
+        """
+        Scan queue contents without removing items (read-only iteration).
+
+        This method provides non-destructive access to queue contents for
+        inspection purposes. Items are NOT removed from the queue.
+
+        Thread Safety and Reentrancy
+        -----------------------------
+        - Uses RLock for reentrant locking (same thread can acquire multiple times)
+        - However, predicate should NOT call scan_and_update() on the same queue
+          because Python's deque doesn't allow mutation during iteration
+        - Debug logging at DEBUG level shows lock acquisition/release for troubleshooting
+
+        Parameters
+        ----------
+        predicate : callable, optional
+            Function to filter items. If provided, only items where
+            predicate(item) returns True are included in result.
+            If None, returns all items.
+
+        Returns
+        -------
+        list[T]
+            List of items matching the predicate (or all items if predicate=None).
+            Items remain in the queue.
+
+        Examples
+        --------
+        >>> q = FilterableQueue()
+        >>> q.put(1)
+        >>> q.put(2)
+        >>> q.put(3)
+        >>> # Scan for even numbers
+        >>> evens = q.scan(lambda x: x % 2 == 0)
+        >>> evens
+        [2]
+        >>> # Items still in queue
+        >>> q.qsize()
+        3
+        """
+        logger.debug(f"[{self.name}] scan() acquiring lock")
+        with self._lock:
+            logger.debug(f"[{self.name}] scan() lock acquired")
+            matches = []
+            # Access underlying deque from queue.Queue
+            # queue.Queue internally uses collections.deque
+            if hasattr(self._queue, "queue"):
+                for item in self._queue.queue:
+                    if predicate is None or predicate(item):
+                        matches.append(item)
+            logger.debug(
+                f"[{self.name}] scan() releasing lock, found {len(matches)} matches"
+            )
+            return matches
+
+    def scan_and_update(self, update_fn: Callable[[T], T | None]) -> int:
+        """
+        Scan and update queue items in-place.
+
+        This method iterates through queue items and applies update_fn to each.
+        If update_fn returns None, the item is removed. Otherwise, the item
+        is replaced with the returned value.
+
+        WARNING: This modifies queue contents in-place.
+
+        Parameters
+        ----------
+        update_fn : callable
+            Function that takes an item and returns:
+            - Updated item to replace original
+            - None to remove the item
+
+        Returns
+        -------
+        int
+            Number of items updated (not removed)
+
+        Examples
+        --------
+        >>> q = FilterableQueue()
+        >>> q.put({'version': 0, 'data': 'a'})
+        >>> q.put({'version': 1, 'data': 'b'})
+        >>> # Update version field
+        >>> def add_flag(item):
+        ...     item['flag'] = True
+        ...     return item
+        >>> updated = q.scan_and_update(add_flag)
+        >>> updated
+        2
+        """
+        logger.debug(f"[{self.name}] scan_and_update() acquiring lock")
+        with self._lock:
+            logger.debug(f"[{self.name}] scan_and_update() lock acquired")
+            updated_count = 0
+            if hasattr(self._queue, "queue"):
+                new_deque = []
+                for item in self._queue.queue:
+                    result = update_fn(item)
+                    if result is not None:
+                        new_deque.append(result)
+                        updated_count += 1
+                # Replace deque contents
+                self._queue.queue.clear()
+                self._queue.queue.extend(new_deque)
+            logger.debug(
+                f"[{self.name}] scan_and_update() releasing lock, updated {updated_count} items"
+            )
+            return updated_count
+
     def _fire_event(self, event_type: str, **kwargs):
         """Fire event for queue operation (if event bus is initialized)."""
         try:

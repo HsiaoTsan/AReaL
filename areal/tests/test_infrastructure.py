@@ -110,8 +110,11 @@ class TestEventBus:
         bus = EventBus()
         calls = []
 
-        handler1 = lambda s, **kw: calls.append("h1")
-        handler2 = lambda s, **kw: calls.append("h2")
+        def handler1(s, **kw):
+            calls.append("h1")
+
+        def handler2(s, **kw):
+            calls.append("h2")
 
         bus.connect("test-event", handler1)
         bus.connect("test-event", handler2)
@@ -134,7 +137,8 @@ class TestEventBus:
         calls = []
         sender = object()
 
-        handler = lambda s, **kw: calls.append("h")
+        def handler(s, **kw):
+            calls.append("h")
 
         bus.connect("test-event", handler, sender=sender)
         bus.send("test-event", sender=sender)
@@ -156,7 +160,9 @@ class TestEventBus:
         assert bus.has_receivers("test-event") is False
 
         # Add receiver
-        handler = lambda s, **kw: None
+        def handler(s, **kw):
+            pass
+
         bus.connect("test-event", handler)
         assert bus.has_receivers("test-event") is True
 
@@ -314,7 +320,6 @@ class TestFilterableQueue:
         from areal.infrastructure.queue import FilterableQueue
 
         q = FilterableQueue()
-        items_added = []
 
         def worker(worker_id):
             for i in range(100):
@@ -345,10 +350,13 @@ class TestFilterableQueue:
         """Test removing a specific filter."""
         from areal.infrastructure.queue import FilterableQueue
 
-        q = FilterableQueue()
-        filter1 = lambda x: x > 0
-        filter2 = lambda x: x < 100
+        def filter1(x):
+            return x > 0
 
+        def filter2(x):
+            return x < 100
+
+        q = FilterableQueue()
         q.add_filter(filter1)
         q.add_filter(filter2)
 
@@ -432,6 +440,178 @@ class TestFilterableQueue:
 
         # After close, queue operations may still work (depends on backend)
         # For memory backend, operations continue to work
+
+    def test_scan_all_items(self):
+        """Test scan returns all items without predicate."""
+        from areal.infrastructure.queue import FilterableQueue
+
+        q = FilterableQueue()
+        q.put(1)
+        q.put(2)
+        q.put(3)
+
+        result = q.scan()
+        assert result == [1, 2, 3]
+        # Items still in queue
+        assert q.qsize() == 3
+
+    def test_scan_with_predicate(self):
+        """Test scan filters items with predicate."""
+        from areal.infrastructure.queue import FilterableQueue
+
+        q = FilterableQueue()
+        for i in range(10):
+            q.put(i)
+
+        # Scan for even numbers
+        evens = q.scan(lambda x: x % 2 == 0)
+        assert evens == [0, 2, 4, 6, 8]
+        # All items still in queue
+        assert q.qsize() == 10
+
+    def test_scan_empty_queue(self):
+        """Test scan on empty queue."""
+        from areal.infrastructure.queue import FilterableQueue
+
+        q = FilterableQueue()
+        result = q.scan()
+        assert result == []
+
+    def test_scan_thread_safe(self):
+        """Test scan is thread-safe."""
+        from areal.infrastructure.queue import FilterableQueue
+
+        q = FilterableQueue()
+        for i in range(100):
+            q.put(i)
+
+        results = []
+
+        def scan_worker():
+            result = q.scan(lambda x: x % 2 == 0)
+            results.append(len(result))
+
+        threads = [threading.Thread(target=scan_worker) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # All threads should get same result
+        assert all(r == 50 for r in results)
+
+    def test_scan_and_update_basic(self):
+        """Test scan_and_update modifies items."""
+        from areal.infrastructure.queue import FilterableQueue
+
+        q = FilterableQueue()
+        q.put({"value": 1})
+        q.put({"value": 2})
+        q.put({"value": 3})
+
+        def add_flag(item):
+            item["flag"] = True
+            return item
+
+        updated = q.scan_and_update(add_flag)
+        assert updated == 3
+
+        # Check items were modified
+        items = []
+        while not q.empty():
+            items.append(q.get())
+        assert all(item["flag"] is True for item in items)
+
+    def test_scan_and_update_remove_items(self):
+        """Test scan_and_update can remove items by returning None."""
+        from areal.infrastructure.queue import FilterableQueue
+
+        q = FilterableQueue()
+        for i in range(10):
+            q.put(i)
+
+        def keep_evens(item):
+            return item if item % 2 == 0 else None
+
+        updated = q.scan_and_update(keep_evens)
+        assert updated == 5  # 5 even numbers kept
+        assert q.qsize() == 5
+
+        # Check only evens remain
+        items = []
+        while not q.empty():
+            items.append(q.get())
+        assert items == [0, 2, 4, 6, 8]
+
+    def test_scan_and_update_with_dict_items(self):
+        """Test scan_and_update with dictionary items."""
+        from areal.infrastructure.queue import FilterableQueue
+
+        q = FilterableQueue()
+        q.put({"version": 4, "data": "a"})
+        q.put({"version": 5, "data": "b"})
+        q.put({"version": 4, "data": "c"})
+
+        def update_old_version(item):
+            if item["version"] == 4:
+                item["updated"] = True
+            return item
+
+        updated = q.scan_and_update(update_old_version)
+        assert updated == 3
+
+        # Check updates
+        items = []
+        while not q.empty():
+            items.append(q.get())
+        assert items[0].get("updated") is True
+        assert items[1].get("updated") is None
+        assert items[2].get("updated") is True
+
+    def test_scan_and_update_thread_safe(self):
+        """Test scan_and_update is thread-safe."""
+        from areal.infrastructure.queue import FilterableQueue
+
+        q = FilterableQueue()
+        for i in range(100):
+            q.put({"value": i, "processed": False})
+
+        def mark_processed(item):
+            item["processed"] = True
+            return item
+
+        # Only one thread should process (due to lock)
+        threads = [
+            threading.Thread(target=lambda: q.scan_and_update(mark_processed))
+            for _ in range(5)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # All items should be marked (last thread wins)
+        items = []
+        while not q.empty():
+            items.append(q.get())
+        assert all(item["processed"] for item in items)
+
+    def test_scan_uses_reentrant_lock(self):
+        """Test that scan uses RLock (allows reentrancy from same thread)."""
+        from areal.infrastructure.queue import FilterableQueue
+
+        q = FilterableQueue()
+        q.put(1)
+
+        # This should not deadlock because RLock allows same thread to re-acquire
+        def reentrant_predicate(item):
+            # Try to acquire lock again (implicitly via scan)
+            # This tests that lock is reentrant
+            _ = q.qsize()  # qsize might use lock internally
+            return True
+
+        result = q.scan(reentrant_predicate)
+        assert result == [1]
 
 
 # ==============================================================================
@@ -614,6 +794,142 @@ class TestListCache:
 
         assert list(cache_copy) == [1, 2, 3]
         assert cache_copy is not cache
+
+    def test_scan_all_items(self):
+        """Test scan returns all items without predicate."""
+        from areal.infrastructure.cache import ListCache
+
+        cache = ListCache([1, 2, 3, 4, 5])
+        result = cache.scan()
+        assert result == [1, 2, 3, 4, 5]
+        # Items still in cache
+        assert len(cache) == 5
+
+    def test_scan_with_predicate(self):
+        """Test scan filters items with predicate."""
+        from areal.infrastructure.cache import ListCache
+
+        cache = ListCache(list(range(10)))
+        evens = cache.scan(lambda x: x % 2 == 0)
+        assert evens == [0, 2, 4, 6, 8]
+        # All items still in cache
+        assert len(cache) == 10
+
+    def test_scan_empty_cache(self):
+        """Test scan on empty cache."""
+        from areal.infrastructure.cache import ListCache
+
+        cache = ListCache()
+        result = cache.scan()
+        assert result == []
+
+    def test_scan_thread_safe(self):
+        """Test scan is thread-safe."""
+        from areal.infrastructure.cache import ListCache
+
+        cache = ListCache(list(range(100)))
+        results = []
+
+        def scan_worker():
+            result = cache.scan(lambda x: x % 2 == 0)
+            results.append(len(result))
+
+        threads = [threading.Thread(target=scan_worker) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # All threads should get same result
+        assert all(r == 50 for r in results)
+
+    def test_scan_and_update_basic(self):
+        """Test scan_and_update modifies items."""
+        from areal.infrastructure.cache import ListCache
+
+        cache = ListCache([{"value": 1}, {"value": 2}, {"value": 3}])
+
+        def add_flag(item):
+            item["flag"] = True
+            return item
+
+        updated = cache.scan_and_update(add_flag)
+        assert updated == 3
+        assert all(item["flag"] is True for item in cache)
+
+    def test_scan_and_update_remove_items(self):
+        """Test scan_and_update can remove items by returning None."""
+        from areal.infrastructure.cache import ListCache
+
+        cache = ListCache(list(range(10)))
+
+        def keep_evens(item):
+            return item if item % 2 == 0 else None
+
+        updated = cache.scan_and_update(keep_evens)
+        assert updated == 5  # 5 even numbers kept
+        assert len(cache) == 5
+        assert list(cache) == [0, 2, 4, 6, 8]
+
+    def test_scan_and_update_with_dict_items(self):
+        """Test scan_and_update with dictionary items."""
+        from areal.infrastructure.cache import ListCache
+
+        cache = ListCache(
+            [
+                {"version": 4, "data": "a"},
+                {"version": 5, "data": "b"},
+                {"version": 4, "data": "c"},
+            ]
+        )
+
+        def update_old_version(item):
+            if item["version"] == 4:
+                item["updated"] = True
+            return item
+
+        updated = cache.scan_and_update(update_old_version)
+        assert updated == 3
+        assert cache[0].get("updated") is True
+        assert cache[1].get("updated") is None
+        assert cache[2].get("updated") is True
+
+    def test_scan_and_update_thread_safe(self):
+        """Test scan_and_update is thread-safe."""
+        from areal.infrastructure.cache import ListCache
+
+        cache = ListCache([{"value": i, "processed": False} for i in range(100)])
+
+        def mark_processed(item):
+            item["processed"] = True
+            return item
+
+        threads = [
+            threading.Thread(target=lambda: cache.scan_and_update(mark_processed))
+            for _ in range(5)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # All items should be marked
+        assert all(item["processed"] for item in cache)
+
+    def test_scan_uses_reentrant_lock(self):
+        """Test that scan uses RLock (allows reentrancy from same thread)."""
+        from areal.infrastructure.cache import ListCache
+
+        cache = ListCache([1, 2, 3])
+
+        # This should not deadlock because RLock allows same thread to re-acquire
+        def reentrant_predicate(item):
+            # Try to acquire lock again (implicitly)
+            _ = len(cache)  # len might use lock internally
+            return True
+
+        result = cache.scan(reentrant_predicate)
+        assert len(result) == 3
 
 
 # ==============================================================================

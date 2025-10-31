@@ -18,6 +18,7 @@ from areal.api.io_struct import (
 )
 from areal.api.workflow_api import RolloutWorkflow
 from areal.core.workflow_executor import WorkflowExecutor
+from areal.infrastructure import WorkflowEvents, fire_events
 from areal.utils import logging, name_resolve, names, pkg_version
 
 logger = logging.getLogger(__name__)
@@ -186,6 +187,10 @@ class SGLangEngine(InferenceEngine):
         executor = ThreadPoolExecutor(max_workers=1)
         return executor.submit(self._update_weights, meta)
 
+    @fire_events(
+        before=WorkflowEvents.PRE_WEIGHT_UPDATE,
+        after=WorkflowEvents.POST_WEIGHT_UPDATE,
+    )
     def _update_weights(self, meta: WeightUpdateMeta):
         if not hasattr(self, "engine") or self.engine is None:
             raise RuntimeError(

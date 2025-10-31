@@ -49,6 +49,7 @@ from typing import Any
 
 from .cache import Cache, ListCache
 from .container import InfrastructureContainer, container
+from .decorators import fire_events
 
 # Core components
 from .events import (
@@ -162,6 +163,7 @@ __all__ = [
     "QueueEvents",
     "CacheEvents",
     "WorkflowEvents",
+    "fire_events",  # Decorator for automatic event firing
     # Queues
     "FilterableQueue",
     # Caches

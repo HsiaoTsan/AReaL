@@ -176,6 +176,33 @@ class ApplicationContainer(containers.DeclarativeContainer):
     """Factory for WorkflowExecutor pending inputs cache."""
 
     # ==============================================================================
+    # Event Handlers
+    # ==============================================================================
+
+    prox_t_handler = providers.Singleton(
+        lambda: __import__(
+            "areal.handlers", fromlist=["ProxTLogprobHandler"]
+        ).ProxTLogprobHandler(
+            output_queue=app_container.async_task_output_queue(),
+            result_cache=app_container.async_task_result_cache(),
+        )
+    )
+    """
+    Singleton handler for computing log_prob_prox_t before weight updates.
+
+    This handler implements segment-wise decoupled PPO by recomputing proximal
+    policy logprobs at prox_t version (behavior + 1) before weight updates.
+
+    To enable, call handler.register() after initializing the container:
+
+    Examples
+    --------
+    >>> from areal.core.app_container import app_container
+    >>> handler = app_container.prox_t_handler()
+    >>> handler.register()  # Register to BEFORE_WEIGHT_UPDATE events
+    """
+
+    # ==============================================================================
     # Inference Engine Factory Methods
     # ==============================================================================
 

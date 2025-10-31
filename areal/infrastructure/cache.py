@@ -15,7 +15,7 @@ Key Design Decisions:
 
 import logging
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Generic, Protocol, TypeVar, overload
 
 logger = logging.getLogger(__name__)
@@ -424,6 +424,88 @@ class ListCache(Generic[T]):
         """
         with self._lock:
             return ListCache(self._data[:], fire_events=self.fire_events)
+
+    def scan(self, predicate: Callable[[T], bool] | None = None) -> list[T]:
+        """
+        Scan cache contents without modifying (read-only iteration).
+
+        Parameters
+        ----------
+        predicate : callable, optional
+            Function to filter items. If provided, only items where
+            predicate(item) returns True are included in result.
+            If None, returns all items.
+
+        Returns
+        -------
+        list[T]
+            List of items matching the predicate (or all items if predicate=None).
+
+        Examples
+        --------
+        >>> cache = ListCache([1, 2, 3, 4, 5])
+        >>> evens = cache.scan(lambda x: x % 2 == 0)
+        >>> evens
+        [2, 4]
+        """
+        logger.debug("ListCache scan() acquiring lock")
+        with self._lock:
+            logger.debug("ListCache scan() lock acquired")
+            if predicate is None:
+                result = self._data[:]
+            else:
+                result = [item for item in self._data if predicate(item)]
+            logger.debug(f"ListCache scan() releasing lock, found {len(result)} items")
+            return result
+
+    def scan_and_update(self, update_fn: Callable[[T], T | None]) -> int:
+        """
+        Scan and update cache items in-place.
+
+        This method iterates through cache items and applies update_fn to each.
+        If update_fn returns None, the item is removed. Otherwise, the item
+        is updated with the returned value.
+
+        WARNING: This modifies cache contents in-place.
+
+        Parameters
+        ----------
+        update_fn : callable
+            Function that takes an item and returns:
+            - Updated item to replace original
+            - None to remove the item
+
+        Returns
+        -------
+        int
+            Number of items updated (not removed)
+
+        Examples
+        --------
+        >>> cache = ListCache([{'v': 0}, {'v': 1}, {'v': 2}])
+        >>> def update_old(item):
+        ...     if item['v'] == 0:
+        ...         item['updated'] = True
+        ...     return item
+        >>> updated = cache.scan_and_update(update_old)
+        >>> cache[0]
+        {'v': 0, 'updated': True}
+        """
+        logger.debug("ListCache scan_and_update() acquiring lock")
+        with self._lock:
+            logger.debug("ListCache scan_and_update() lock acquired")
+            updated_count = 0
+            new_data = []
+            for item in self._data:
+                result = update_fn(item)
+                if result is not None:
+                    new_data.append(result)
+                    updated_count += 1
+            self._data = new_data
+            logger.debug(
+                f"ListCache scan_and_update() releasing lock, updated {updated_count} items"
+            )
+            return updated_count
 
     def _fire_event(self, event_type: str, **kwargs):
         """Fire event for cache operation (if event bus is initialized)."""
