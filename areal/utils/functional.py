@@ -354,6 +354,108 @@ def ppo_actor_loss_fn(
     return pg_loss, stat
 
 
+def scopic_actor_loss_fn(
+    logprobs: torch.Tensor,
+    proximal_logprobs: torch.Tensor,
+    old_logprobs: torch.Tensor,
+    advantages: torch.Tensor,
+    loss_mask: torch.Tensor,
+    tau: float = 1.0,
+    behav_imp_weight_cap: float | None = None,
+    importance_sampling_level: str = "token",
+    cu_seqlens: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, dict]:
+    """
+    Scopic preconditioned actor loss for async RL.
+
+    Replaces PPO clipping with sigmoid-based preconditioning:
+        r_t^(prox) = π_θ / π_prox
+        p = σ(τ(r_t^(prox) - 1))
+        L_actor = E[-4/τ * p(1-p) * r_t^(prox) * c_t * A_t]
+
+    where p(1-p) is the sigmoid derivative gating term that naturally handles
+    policy drift in asynchronous settings.
+
+    Args:
+        logprobs: Current policy log probabilities (π_θ)
+        proximal_logprobs: Reference policy log probabilities (π_prox), recomputed
+        old_logprobs: Inference engine log probabilities (for behavior cloning weight)
+        advantages: Advantage estimates
+        loss_mask: Mask for valid tokens
+        tau: Scopic temperature parameter controlling sigmoid sharpness (default: 1.0)
+        behav_imp_weight_cap: Cap for behavior cloning importance weight
+        importance_sampling_level: 'token' (PPO) or 'sequence' (GSPO)
+        cu_seqlens: Cumulative sequence lengths for packed sequences (GSPO)
+
+    Returns:
+        pg_loss: Scalar policy gradient loss
+        stat: Dictionary of training statistics
+    """
+    loss_mask_count = loss_mask.count_nonzero() or 1
+
+    # 1. Compute importance sampling ratio r_t^(prox) = π_θ / π_prox
+    if importance_sampling_level == "sequence":
+        # GSPO: Sequence-level geometric mean of probability ratios
+        log_ratio = logprobs - proximal_logprobs
+        ratio, advantages = _compute_sequence_level_ratio_and_advantages(
+            log_ratio, advantages, loss_mask, cu_seqlens
+        )
+    elif importance_sampling_level == "token":
+        # Standard token-level ratio
+        ratio = torch.where(loss_mask, torch.exp(logprobs - proximal_logprobs), 0)
+    else:
+        raise ValueError(
+            f"Invalid importance_sampling_level: {importance_sampling_level}. "
+            "Must be 'token' or 'sequence'."
+        )
+
+    # 2. Compute sigmoid gating: p = σ(τ(r_t - 1))
+    z = tau * (ratio - 1.0)
+    p = torch.sigmoid(z)
+
+    # 3. Compute sigmoid derivative: p(1-p)
+    sigmoid_derivative = p * (1.0 - p)
+
+    # 4. Compute Scopic preconditioner: (4/τ) * p(1-p) * r_t
+    preconditioner = (4.0 / tau) * sigmoid_derivative * ratio
+
+    # 5. Compute behavior cloning weight c_t = exp(π_prox - π_old)
+    behav_kl = proximal_logprobs - old_logprobs
+    behav_imp_weight = behav_kl.exp()
+    behav_mask = (
+        (behav_imp_weight <= behav_imp_weight_cap).logical_and(loss_mask)
+        if behav_imp_weight_cap is not None
+        else loss_mask
+    )
+    behav_kl = torch.where(behav_mask, behav_kl, 0.0)
+    behav_imp_weight = torch.where(behav_mask, behav_imp_weight, 0.0)
+
+    # 6. Compute final loss: -preconditioner * c_t * A_t
+    pg_loss = -preconditioner * behav_imp_weight * advantages
+
+    # 7. Apply mask and aggregate
+    logging_loss = pg_loss.detach()
+    pg_loss = torch.where(loss_mask, pg_loss, 0).sum() / loss_mask_count
+
+    # 8. Collect statistics
+    stat = dict(
+        loss=logging_loss,
+        importance_weight=ratio.detach(),
+        approx_kl=(logprobs - proximal_logprobs).detach(),
+        sigmoid_p=p.detach(),
+        sigmoid_derivative=sigmoid_derivative.detach(),
+        preconditioner=preconditioner.detach(),
+        behave_imp_weight=behav_imp_weight,
+        behave_approx_kl=behav_kl,
+        behave_mask=behav_mask,
+        # Dummy clip masks for compatibility with logging code
+        clip_mask=torch.zeros_like(loss_mask, dtype=torch.bool),
+        dual_clip_mask=torch.zeros_like(loss_mask, dtype=torch.bool),
+    )
+
+    return pg_loss, stat
+
+
 def _huber_loss(x: torch.Tensor, y: torch.Tensor, delta: float):
     diff = torch.abs(x - y)
     return torch.where(diff < delta, 0.5 * diff**2, delta * (diff - 0.5 * delta))

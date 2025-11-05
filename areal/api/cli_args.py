@@ -494,6 +494,23 @@ class PPOActorConfig(TrainEngineConfig):
             "choices": ["token", "sequence"],
         },
     )
+
+    # Scopic preconditioned loss (mutually exclusive with PPO clipping)
+    use_scopic_loss: bool = field(
+        default=False,
+        metadata={
+            "help": "Use Scopic preconditioned loss instead of PPO clipping. "
+                   "Replaces clipping with sigmoid-based preconditioning for async RL. "
+                   "Mutually exclusive with eps_clip/c_clip (they will be ignored if this is True)."
+        },
+    )
+    scopic_tau: float = field(
+        default=1.0,
+        metadata={
+            "help": "Scopic temperature parameter τ controlling sigmoid sharpness. "
+                   "Higher values = sharper gating. Typical range: 0.5-2.0. Only used when use_scopic_loss=True."
+        },
+    )
     # Advanced Options
     dynamic_sampling: bool = field(
         default=False,

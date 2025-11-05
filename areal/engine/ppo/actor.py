@@ -19,6 +19,7 @@ from areal.utils.functional import (
     gather_logprobs_entropy,
     ppo_actor_loss_fn,
     reward_overlong_penalty,
+    scopic_actor_loss_fn,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,8 +53,27 @@ class PPOActor:
 
         self.m2_threshold = config.m2_threshold
 
+        # Validate Scopic and PPO are mutually exclusive
+        if config.use_scopic_loss:
+            logger.info("🔬 Scopic preconditioned loss ENABLED (PPO clipping disabled)")
+            if config.eps_clip != 0.2 or config.c_clip is not None:
+                logger.warning(
+                    "⚠️  use_scopic_loss=True: PPO clipping parameters (eps_clip, c_clip) will be IGNORED. "
+                    "Scopic uses sigmoid-based preconditioning instead."
+                )
+            if not config.use_decoupled_loss:
+                logger.warning(
+                    "⚠️  Scopic is designed for decoupled (async) RL. "
+                    "Consider setting use_decoupled_loss=True for best performance."
+                )
+
         # Log critical GSPO/GRPO configuration for reproducibility
         logger.info("PPOActor Configuration:")
+        logger.info(f"  use_scopic_loss: {config.use_scopic_loss}")
+        if config.use_scopic_loss:
+            logger.info(f"  scopic_tau: {config.scopic_tau}")
+        else:
+            logger.info(f"  eps_clip: {config.eps_clip}")
         logger.info(
             f"  importance_sampling_level: {getattr(config, 'importance_sampling_level', 'NOT SET (defaults to token)')}"
         )
@@ -63,7 +83,6 @@ class PPOActor:
         logger.info(
             f"  reward_norm: {config.reward_norm if config.reward_norm else 'DISABLED (None)'}"
         )
-        logger.info(f"  eps_clip: {config.eps_clip}")
         logger.info(f"  group_size: {config.group_size}")
 
     @torch.no_grad()
@@ -286,6 +305,8 @@ class PPOActor:
                     behav_imp_weight_cap=self.config.behav_imp_weight_cap,
                     m2_threshold=self.m2_threshold,
                     importance_sampling_level=self.config.importance_sampling_level,
+                    use_scopic_loss=self.config.use_scopic_loss,
+                    scopic_tau=self.config.scopic_tau,
                 ),
                 loss_weight_fn=lambda x: x["loss_mask"].count_nonzero(),
             )
@@ -341,9 +362,19 @@ def grpo_loss_fn(
     behav_imp_weight_cap: float | None,
     m2_threshold: float | None = None,
     importance_sampling_level: str = "token",
+    use_scopic_loss: bool = False,
+    scopic_tau: float = 1.0,
 ):
     """Loss function for actor step, all inputs should be splitted into
     pipeline micro batches, returns loss and logging stats."""
+
+    # Validate mutually exclusive loss types
+    if use_scopic_loss and (eps_clip != 0.2 or c_clip is not None):
+        logger.warning(
+            "use_scopic_loss=True: Ignoring PPO clipping parameters (eps_clip, eps_clip_higher, c_clip). "
+            "Scopic uses sigmoid preconditioning instead."
+        )
+
     # Use rolled input_ids. Ulysses SP will roll input_ids in ulysses_prepare_inputs().
     labels = input_data.get(
         "rolled_input_ids",
@@ -380,19 +411,33 @@ def grpo_loss_fn(
             full_loss_mask = m2_full_flat.view_as(loss_mask)
         loss_mask = full_loss_mask
 
-    loss, stat = ppo_actor_loss_fn(
-        logprobs=logprobs,
-        old_logprobs=old_logp,
-        advantages=advantages,
-        eps_clip=eps_clip,
-        eps_clip_higher=eps_clip_higher,
-        loss_mask=loss_mask,
-        c_clip=c_clip,
-        proximal_logprobs=prox_logp,
-        behav_imp_weight_cap=behav_imp_weight_cap,
-        importance_sampling_level=importance_sampling_level,
-        cu_seqlens=input_data.get("cu_seqlens"),
-    )
+    # Choose loss function: Scopic or PPO
+    if use_scopic_loss:
+        loss, stat = scopic_actor_loss_fn(
+            logprobs=logprobs,
+            proximal_logprobs=prox_logp,
+            old_logprobs=old_logp,
+            advantages=advantages,
+            loss_mask=loss_mask,
+            tau=scopic_tau,
+            behav_imp_weight_cap=behav_imp_weight_cap,
+            importance_sampling_level=importance_sampling_level,
+            cu_seqlens=input_data.get("cu_seqlens"),
+        )
+    else:
+        loss, stat = ppo_actor_loss_fn(
+            logprobs=logprobs,
+            old_logprobs=old_logp,
+            advantages=advantages,
+            eps_clip=eps_clip,
+            eps_clip_higher=eps_clip_higher,
+            loss_mask=loss_mask,
+            c_clip=c_clip,
+            proximal_logprobs=prox_logp,
+            behav_imp_weight_cap=behav_imp_weight_cap,
+            importance_sampling_level=importance_sampling_level,
+            cu_seqlens=input_data.get("cu_seqlens"),
+        )
 
     # Log training statistics
     stats_tracker.denominator(
@@ -413,6 +458,14 @@ def grpo_loss_fn(
         dual_clip_ratio=stat["dual_clip_mask"].float(),
         denominator="n_valid_tokens",
     )
+    # Log Scopic-specific statistics
+    if use_scopic_loss:
+        stats_tracker.stat(
+            scopic_sigmoid_p=stat["sigmoid_p"],
+            scopic_sigmoid_derivative=stat["sigmoid_derivative"],
+            scopic_preconditioner=stat["preconditioner"],
+            denominator="n_valid_tokens",
+        )
     if "behave_imp_weight" in stat:
         stats_tracker.denominator(unclipped_behave_tokens=stat["behave_mask"])
         stats_tracker.stat(
