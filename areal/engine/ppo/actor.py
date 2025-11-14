@@ -307,6 +307,9 @@ class PPOActor:
                     importance_sampling_level=self.config.importance_sampling_level,
                     use_scopic_loss=self.config.use_scopic_loss,
                     scopic_tau=self.config.scopic_tau,
+                    scopic_eps_safety_clip=self.config.scopic_eps_safety_clip,
+                    use_p3o_reweighting=self.config.use_p3o_reweighting,
+                    p3o_tau=self.config.p3o_tau,
                 ),
                 loss_weight_fn=lambda x: x["loss_mask"].count_nonzero(),
             )
@@ -364,16 +367,12 @@ def grpo_loss_fn(
     importance_sampling_level: str = "token",
     use_scopic_loss: bool = False,
     scopic_tau: float = 1.0,
+    scopic_eps_safety_clip: float | None = None,
+    use_p3o_reweighting: bool = False,
+    p3o_tau: float = 1.0,
 ):
     """Loss function for actor step, all inputs should be splitted into
     pipeline micro batches, returns loss and logging stats."""
-
-    # Validate mutually exclusive loss types
-    if use_scopic_loss and (eps_clip != 0.2 or c_clip is not None):
-        logger.warning(
-            "use_scopic_loss=True: Ignoring PPO clipping parameters (eps_clip, eps_clip_higher, c_clip). "
-            "Scopic uses sigmoid preconditioning instead."
-        )
 
     # Use rolled input_ids. Ulysses SP will roll input_ids in ulysses_prepare_inputs().
     labels = input_data.get(
@@ -423,6 +422,7 @@ def grpo_loss_fn(
             behav_imp_weight_cap=behav_imp_weight_cap,
             importance_sampling_level=importance_sampling_level,
             cu_seqlens=input_data.get("cu_seqlens"),
+            eps_safety_clip=scopic_eps_safety_clip,
         )
     else:
         loss, stat = ppo_actor_loss_fn(
@@ -437,6 +437,8 @@ def grpo_loss_fn(
             behav_imp_weight_cap=behav_imp_weight_cap,
             importance_sampling_level=importance_sampling_level,
             cu_seqlens=input_data.get("cu_seqlens"),
+            use_p3o_reweighting=use_p3o_reweighting,
+            p3o_tau=p3o_tau,
         )
 
     # Log training statistics
@@ -460,10 +462,18 @@ def grpo_loss_fn(
     )
     # Log Scopic-specific statistics
     if use_scopic_loss:
+        stats_tracker.denominator(soft_clipped_tokens=stat["soft_clipped_mask"])
         stats_tracker.stat(
             scopic_sigmoid_p=stat["sigmoid_p"],
             scopic_sigmoid_derivative=stat["sigmoid_derivative"],
             scopic_preconditioner=stat["preconditioner"],
+            scopic_soft_clip_ratio=stat["soft_clipped_mask"].float(),
+            denominator="n_valid_tokens",
+        )
+    # Log P3O-specific statistics
+    if use_p3o_reweighting and "p3o_weight" in stat:
+        stats_tracker.stat(
+            p3o_weight=stat["p3o_weight"],
             denominator="n_valid_tokens",
         )
     if "behave_imp_weight" in stat:

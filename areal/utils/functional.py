@@ -274,6 +274,8 @@ def ppo_actor_loss_fn(
     behav_imp_weight_cap: float | None = None,
     importance_sampling_level: str = "token",
     cu_seqlens: torch.Tensor | None = None,
+    use_p3o_reweighting: bool = False,
+    p3o_tau: float = 1.0,
 ) -> tuple[torch.Tensor, dict]:
     """
     When decoupled loss is disabled:
@@ -308,6 +310,17 @@ def ppo_actor_loss_fn(
             f"Invalid importance_sampling_level: {importance_sampling_level}. "
             "Must be 'token' or 'sequence'."
         )
+
+    # P3O advantage reweighting (optional, detached)
+    # w(r) = (4/tau) * sigmoid(tau*(r-1)) * (1 - sigmoid(tau*(r-1)))
+    # This provides off-policyness control without affecting gradients
+    if use_p3o_reweighting:
+        with torch.no_grad():
+            p = torch.sigmoid(p3o_tau * (ratio - 1.0))
+            p3o_weight = (4.0 / p3o_tau) * p * (1.0 - p)
+        advantages = advantages * p3o_weight  # Reweight advantages
+    else:
+        p3o_weight = None
 
     clipped_ratio = torch.clamp(
         ratio,
@@ -351,6 +364,9 @@ def ppo_actor_loss_fn(
         stat["behave_imp_weight"] = behav_imp_weight
         stat["behave_approx_kl"] = behav_kl
         stat["behave_mask"] = behav_mask
+    # P3O statistics
+    if use_p3o_reweighting and p3o_weight is not None:
+        stat["p3o_weight"] = torch.where(loss_mask, p3o_weight, 0.0)
     return pg_loss, stat
 
 
@@ -364,17 +380,20 @@ def scopic_actor_loss_fn(
     behav_imp_weight_cap: float | None = None,
     importance_sampling_level: str = "token",
     cu_seqlens: torch.Tensor | None = None,
+    eps_safety_clip: float | None = None,
 ) -> tuple[torch.Tensor, dict]:
     """
-    Scopic preconditioned actor loss for async RL.
+    Scopic preconditioned actor loss for async RL with optional hard clip safety.
 
     Replaces PPO clipping with sigmoid-based preconditioning:
-        r_t^(prox) = π_θ / π_prox
-        p = σ(τ(r_t^(prox) - 1))
-        L_actor = E[-4/τ * p(1-p) * r_t^(prox) * c_t * A_t]
+        r_base = π_θ / π_prox
+        r_safe = clip(r_base, 1-eps_safety, 1+eps_safety)  [optional hard clip]
+        p = σ(τ(r_safe - 1))
+        L_actor = E[-4/τ * p(1-p) * r_safe * c_t * A_t]
 
-    where p(1-p) is the sigmoid derivative gating term that naturally handles
-    policy drift in asynchronous settings.
+    The optional eps_safety_clip provides a hard upper bound as a "safety fuse"
+    to prevent extreme ratio values (e.g., 1e6), while Scopic's soft constraint
+    provides smooth gradients in the normal range.
 
     Args:
         logprobs: Current policy log probabilities (π_θ)
@@ -386,6 +405,8 @@ def scopic_actor_loss_fn(
         behav_imp_weight_cap: Cap for behavior cloning importance weight
         importance_sampling_level: 'token' (PPO) or 'sequence' (GSPO)
         cu_seqlens: Cumulative sequence lengths for packed sequences (GSPO)
+        eps_safety_clip: Hard clip range [1-eps, 1+eps] as safety fuse (e.g., 0.5).
+                         None disables hard clipping (pure soft Scopic).
 
     Returns:
         pg_loss: Scalar policy gradient loss
@@ -393,31 +414,50 @@ def scopic_actor_loss_fn(
     """
     loss_mask_count = loss_mask.count_nonzero() or 1
 
-    # 1. Compute importance sampling ratio r_t^(prox) = π_θ / π_prox
+    # 1. Compute importance sampling ratio r_base = π_θ / π_prox
     if importance_sampling_level == "sequence":
         # GSPO: Sequence-level geometric mean of probability ratios
         log_ratio = logprobs - proximal_logprobs
-        ratio, advantages = _compute_sequence_level_ratio_and_advantages(
+        ratio_base, advantages = _compute_sequence_level_ratio_and_advantages(
             log_ratio, advantages, loss_mask, cu_seqlens
         )
     elif importance_sampling_level == "token":
         # Standard token-level ratio
-        ratio = torch.where(loss_mask, torch.exp(logprobs - proximal_logprobs), 0)
+        ratio_base = torch.where(loss_mask, torch.exp(logprobs - proximal_logprobs), 0)
     else:
         raise ValueError(
             f"Invalid importance_sampling_level: {importance_sampling_level}. "
             "Must be 'token' or 'sequence'."
         )
 
-    # 2. Compute sigmoid gating: p = σ(τ(r_t - 1))
+    # 2. Apply optional hard clip as safety fuse
+    # r_safe = clip(r_base, 1-eps, 1+eps) if eps_safety_clip is set
+    if eps_safety_clip is not None:
+        # Clip in ratio space with strong enforcement
+        ratio_clipped = torch.clamp(
+            ratio_base,
+            1.0 - eps_safety_clip,
+            1.0 + eps_safety_clip,
+        )
+        # Track which tokens were hard-clipped
+        hard_clip_mask = (ratio_base != ratio_clipped).logical_and(loss_mask)
+        ratio = ratio_clipped
+    else:
+        hard_clip_mask = torch.zeros_like(loss_mask, dtype=torch.bool)
+        ratio = ratio_base
+
+    # 3. Compute sigmoid gating: p = σ(τ(r_safe - 1))
     z = tau * (ratio - 1.0)
     p = torch.sigmoid(z)
 
     # 3. Compute sigmoid derivative: p(1-p)
-    sigmoid_derivative = p * (1.0 - p)
-
     # 4. Compute Scopic preconditioner: (4/τ) * p(1-p) * r_t
+    # Fuse operations to reduce intermediate tensors
+    sigmoid_derivative = p * (1.0 - p)
     preconditioner = (4.0 / tau) * sigmoid_derivative * ratio
+
+    # Release intermediate variables to save memory
+    del z  # No longer needed
 
     # 5. Compute behavior cloning weight c_t = exp(π_prox - π_old)
     behav_kl = proximal_logprobs - old_logprobs
@@ -438,19 +478,40 @@ def scopic_actor_loss_fn(
     pg_loss = torch.where(loss_mask, pg_loss, 0).sum() / loss_mask_count
 
     # 8. Collect statistics
+    # Compute "soft clipping" indicator: tokens where sigmoid derivative < 0.2
+    # (indicates ratio is far from 1.0, similar to being "clipped" in PPO)
+    soft_clipped_mask = sigmoid_derivative < 0.2
+
+    # Optional: Compute PPO-style selective clip mask for comparison
+    # This shows which tokens would be clipped by PPO's selective clipping logic
+    if eps_safety_clip is not None:
+        # Simulate what PPO would do with the same eps
+        ratio_would_be_clipped = torch.clamp(ratio_base, 1.0 - eps_safety_clip, 1.0 + eps_safety_clip)
+        pg_loss_unclipped = -ratio_base * behav_imp_weight * advantages
+        pg_loss_clipped = -ratio_would_be_clipped * behav_imp_weight * advantages
+        selective_clip_mask = (pg_loss_unclipped.detach() < pg_loss_clipped.detach()).logical_and(loss_mask)
+    else:
+        selective_clip_mask = torch.zeros_like(loss_mask, dtype=torch.bool)
+
+    # Memory optimization: only store what's needed for logging
+    # For per-token statistics, we mask and let stats_tracker compute the mean
     stat = dict(
         loss=logging_loss,
-        importance_weight=ratio.detach(),
+        importance_weight=ratio_base.detach(),  # Before safety clip (same as PPO)
         approx_kl=(logprobs - proximal_logprobs).detach(),
-        sigmoid_p=p.detach(),
-        sigmoid_derivative=sigmoid_derivative.detach(),
-        preconditioner=preconditioner.detach(),
+        # Store only masked values to reduce memory
+        sigmoid_p=torch.where(loss_mask, p.detach(), 0.0),
+        sigmoid_derivative=torch.where(loss_mask, sigmoid_derivative.detach(), 0.0),
+        preconditioner=torch.where(loss_mask, preconditioner.detach(), 0.0),
         behave_imp_weight=behav_imp_weight,
         behave_approx_kl=behav_kl,
         behave_mask=behav_mask,
-        # Dummy clip masks for compatibility with logging code
-        clip_mask=torch.zeros_like(loss_mask, dtype=torch.bool),
+        # Clip masks for tracking
+        # Use selective_clip_mask to match PPO's definition (tokens where clipping is actually used)
+        clip_mask=selective_clip_mask if eps_safety_clip is not None else torch.zeros_like(loss_mask, dtype=torch.bool),
         dual_clip_mask=torch.zeros_like(loss_mask, dtype=torch.bool),
+        # Soft clipping indicator (for diagnostics)
+        soft_clipped_mask=soft_clipped_mask.detach(),
     )
 
     return pg_loss, stat

@@ -511,6 +511,36 @@ class PPOActorConfig(TrainEngineConfig):
                    "Higher values = sharper gating. Typical range: 0.5-2.0. Only used when use_scopic_loss=True."
         },
     )
+    scopic_eps_safety_clip: float | None = field(
+        default=None,
+        metadata={
+            "help": "Optional hard clip safety range [1-eps, 1+eps] as a 'safety fuse' for Scopic. "
+                   "When set (e.g., 0.5), provides hard upper bound to prevent extreme ratio values (e.g., 1e6), "
+                   "while Scopic's soft constraint provides smooth gradients in normal range. "
+                   "None disables hard clipping (pure soft Scopic). Typical values: 0.3-0.5. "
+                   "Only used when use_scopic_loss=True."
+        },
+    )
+
+    # P3O Advantage Reweighting (compatible with PPO/DAPO clipping)
+    use_p3o_reweighting: bool = field(
+        default=False,
+        metadata={
+            "help": "Use P3O-style sigmoid advantage reweighting (detached). "
+                   "Applies w(r) = (4/tau) * sigmoid(tau*(r-1)) * (1-sigmoid(tau*(r-1))) to advantages "
+                   "before computing PPO/DAPO loss. This provides off-policyness control without changing "
+                   "the gradient flow (w is detached). Compatible with eps_clip, eps_clip_higher, c_clip. "
+                   "Cannot be used together with use_scopic_loss."
+        },
+    )
+    p3o_tau: float = field(
+        default=1.0,
+        metadata={
+            "help": "P3O sigmoid temperature parameter τ controlling reweighting sharpness. "
+                   "Higher values = sharper reweighting around r=1. Typical range: 0.5-2.0. "
+                   "Only used when use_p3o_reweighting=True."
+        },
+    )
     # Advanced Options
     dynamic_sampling: bool = field(
         default=False,
@@ -1150,6 +1180,13 @@ class DatasetConfig:
         default=None,
         metadata={
             "help": "Maximum token length of sequences in dataset. Longer sequences are filtered out."
+        },
+    )
+    level_filter: list | None = field(
+        default=None,
+        metadata={
+            "help": "Filter dataset by difficulty levels (e.g., [1, 2] for SimpleRL-Zoo-Data). "
+            "Only applicable to datasets with level metadata."
         },
     )
 
