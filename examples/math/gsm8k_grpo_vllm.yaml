@@ -152,8 +152,8 @@ stats_logger:
     group: ${experiment_name}_${trial_name}
     notes: null
     tags: null
-    wandb_base_url: null
-    wandb_api_key: null
+    wandb_base_url: "" 
+    wandb_api_key: ""
     id_suffix: timestamp
 
 # Launcher
