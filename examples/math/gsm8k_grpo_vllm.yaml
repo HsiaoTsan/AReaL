@@ -145,6 +145,16 @@ stats_logger:
   fileroot: ${cluster.fileroot}
   wandb:
     mode: disabled
+    entity: null
+    project: null
+    name: null
+    job_type: train
+    group: ${experiment_name}_${trial_name}
+    notes: null
+    tags: null
+    wandb_base_url: null
+    wandb_api_key: null
+    id_suffix: timestamp
 
 # Launcher
 launcher:
