@@ -148,7 +148,7 @@ stats_logger:
     entity: null
     project: null
     name: null
-    job_type: train
+    job_type: null
     group: ${experiment_name}_${trial_name}
     notes: null
     tags: null
