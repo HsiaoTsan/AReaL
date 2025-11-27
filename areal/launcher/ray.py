@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import pathlib
 import re
 import sys
@@ -330,6 +331,9 @@ class RayLauncher:
 
 def main():
     ray.init()
+    # Capture the original command for W&B logging
+    original_command = " ".join(sys.argv)
+    os.environ["AREAL_ORIGINAL_COMMAND"] = original_command
     config, _ = parse_cli_args(sys.argv[1:])
     ray_main(config, run_id=0)
 
@@ -549,6 +553,9 @@ def ray_main(config, run_id: int = 0):
             AREAL_LLM_SERVER_ADDRS=",".join(llm_addrs),
             AREAL_RECOVER_RUN=str(int(is_recover_run)),
         )
+        # Pass the original command to trainer for W&B logging
+        if "AREAL_ORIGINAL_COMMAND" in os.environ:
+            _env_vars["AREAL_ORIGINAL_COMMAND"] = os.environ["AREAL_ORIGINAL_COMMAND"]
         if allocation_mode.gen_backend == "sglang":
             # Required by NCCL weight update group.
             _env_vars["NCCL_CUMEM_ENABLE"] = "0"

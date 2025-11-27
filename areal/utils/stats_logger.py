@@ -58,6 +58,12 @@ class StatsLogger:
             "version": version_info.full_version_with_dirty_description,
         }
 
+        # Use the original command captured by the launcher if available
+        wandb_settings = None
+        original_command = os.environ.get("AREAL_ORIGINAL_COMMAND")
+        if original_command:
+            wandb_settings = wandb.Settings(program_relpath=original_command)
+
         wandb.init(
             mode=self.config.wandb.mode,
             entity=self.config.wandb.entity,
@@ -73,6 +79,7 @@ class StatsLogger:
             force=True,
             id=f"{self.config.experiment_name}_{self.config.trial_name}_{suffix}",
             resume="allow",
+            settings=wandb_settings,
         )
 
         swanlab_config = self.config.swanlab
