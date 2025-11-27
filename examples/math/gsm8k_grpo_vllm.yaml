@@ -147,9 +147,9 @@ stats_logger:
     mode: disabled
     entity: null
     project: null
-    name: null
+    name: ${trial_name}
     job_type: null
-    group: ${experiment_name}_${trial_name}
+    group: ${experiment_name}
     notes: null
     tags: null
     wandb_base_url: "" 
