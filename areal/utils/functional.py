@@ -317,7 +317,7 @@ def ppo_actor_loss_fn(
     if use_p3o_reweighting:
         with torch.no_grad():
             p = torch.sigmoid(p3o_tau * (ratio - 1.0))
-            p3o_weight = (4.0 / p3o_tau) * p * (1.0 - p)
+            p3o_weight = 4.0  * p * (1.0 - p)
         advantages = advantages * p3o_weight  # Reweight advantages
     else:
         p3o_weight = None

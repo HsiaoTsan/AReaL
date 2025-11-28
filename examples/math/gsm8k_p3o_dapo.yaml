@@ -2,17 +2,17 @@ experiment_name: gsm8k-p3o-dapo
 trial_name: trial0
 
 seed: 1
-total_train_epochs: 10
+total_train_epochs: 20
 tokenizer_path: ${actor.path}
 async_training: true
 
 cluster:
   n_nodes: 1
   n_gpus_per_node: 8
-  fileroot: /tmp/areal/experiments
+  fileroot: /data/areal/experiments
   name_resolve:
     type: nfs
-    nfs_record_root: /tmp/areal/name_resolve
+    nfs_record_root: /data/areal/name_resolve
 
 allocation_mode: sglang.d4p1t1+d4p1t1
 
@@ -41,7 +41,7 @@ actor:
   gradient_checkpointing: false
   dtype: bfloat16
   mb_spec:
-    max_tokens_per_mb: 10240
+    max_tokens_per_mb: 4096
   optimizer:
     type: adam
     lr: 1.70e-5
@@ -57,8 +57,8 @@ actor:
 
   # P3O + DAPO Configuration
   # DAPO: Asymmetric clipping for exploration-exploitation balance
-  eps_clip: 0.15          # Conservative lower bound (prevent ratio < 0.85)
-  eps_clip_higher: 0.6    # Relaxed upper bound (allow ratio up to 1.6)
+  eps_clip: 0.4          # Conservative lower bound (prevent ratio < 0.85)
+  eps_clip_higher: 0.6   # Relaxed upper bound (allow ratio up to 1.6)
 
   # P3O: Advantage reweighting for off-policyness control
   use_p3o_reweighting: true
@@ -102,13 +102,13 @@ sglang:
   random_seed: ${seed}
   skip_tokenizer_init: true
   dtype: ${actor.dtype}
-  max_running_requests: null
+  max_running_requests: 64
   context_length: 32768
   mem_fraction_static: 0.8
 
 # datasets
 train_dataset:
-  batch_size: 256
+  batch_size: 32
   shuffle: true
   pin_memory: true
   num_workers: 4

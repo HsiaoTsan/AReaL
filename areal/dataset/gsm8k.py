@@ -38,14 +38,18 @@ def get_gsm8k_rl_dataset(
     # Load dataset - support both GSM8K and SimpleRL-Zoo-Data
     # Check for SimpleRL dataset (handles both HF path and local cache path)
     path_lower = path.lower()
-    is_simplerl = any(x in path_lower for x in ["simplerl", "hkust-nlp"])
+    is_simplerl = any(x in path_lower for x in ["simplerl", "hkust-nlp", "dapo-math", "open-r1"])
 
     if is_simplerl:
         # SimpleRL-Zoo-Data format - handle schema differences between splits
         import os
 
+        # Check if this is a HuggingFace cache directory (not user-prepared local files)
+        is_hf_cache = os.path.isdir(path) and ("/hub/datasets--" in path or "/snapshots/" in path or "\\hub\\datasets--" in path or "\\snapshots\\" in path)
+
         # For local directory with schema mismatch, only load train.parquet
-        if os.path.isdir(path):
+        # But skip if this is HuggingFace cache (let HF handle it)
+        if os.path.isdir(path) and not is_hf_cache:
             train_file = os.path.join(path, "train.parquet")
             test_file = os.path.join(path, "test.parquet")
 
@@ -64,12 +68,36 @@ def get_gsm8k_rl_dataset(
             else:
                 raise FileNotFoundError(f"Train file not found: {train_file}")
         else:
-            # For HuggingFace Hub path, load normally
+            # For HuggingFace Hub path or HF cache, load normally
             try:
-                dataset = load_dataset(path=path, split=split)
+                # If this is a HF cache directory, find parquet files
+                if is_hf_cache:
+                    import glob
+                    parquet_files = glob.glob(os.path.join(path, "*.parquet"))
+                    if parquet_files:
+                        print(f"Loading from HF cache: {path}, found {len(parquet_files)} parquet files")
+                        dataset = load_dataset("parquet", data_files=parquet_files, split="train")
+                    else:
+                        # Try the original HF path by extracting dataset name
+                        # From: /data/hf_home/hub/datasets--open-r1--DAPO-Math-17k-Processed/...
+                        # To: open-r1/DAPO-Math-17k-Processed
+                        dataset_name = path.split("datasets--")[-1].split("/snapshots/")[0].replace("--", "/")
+                        print(f"Extracted dataset name: {dataset_name}")
+                        dataset = load_dataset(path=dataset_name, split=split)
+                else:
+                    dataset = load_dataset(path=path, split=split)
             except Exception as e:
                 print(f"Warning: Failed to load {split} split, falling back to train split. Error: {e}")
-                dataset = load_dataset(path=path, split="train")
+                try:
+                    dataset = load_dataset(path=path, split="train")
+                except:
+                    # Last resort: try to extract dataset name from cache path
+                    if "datasets--" in path:
+                        dataset_name = path.split("datasets--")[-1].split("/snapshots/")[0].split("\\snapshots\\")[0].replace("--", "/")
+                        print(f"Fallback: using extracted dataset name: {dataset_name}")
+                        dataset = load_dataset(path=dataset_name, split="train")
+                    else:
+                        raise
                 if split == "test":
                     dataset = dataset.train_test_split(test_size=0.1, seed=42)["test"]
                 elif split == "train":
@@ -85,6 +113,12 @@ def get_gsm8k_rl_dataset(
                 question = sample["question"]
             elif "extra_info" in sample and isinstance(sample["extra_info"], dict) and "question" in sample["extra_info"]:
                 question = sample["extra_info"]["question"]
+            elif "source_prompt" in sample and isinstance(sample["source_prompt"], list):
+                # DAPO-Math format: source_prompt is a list of messages
+                question = next(
+                    (msg["content"] for msg in sample["source_prompt"] if msg.get("role") == "user"),
+                    None
+                )
             elif "prompt" in sample and isinstance(sample["prompt"], list):
                 # Extract content from first user message
                 question = next(
@@ -150,7 +184,7 @@ def get_gsm8k_rl_dataset(
             print(f"Dataset size after level filtering: {len(dataset)}")
 
         # Remove unnecessary columns if they exist
-        cols_to_remove = [col for col in ["prompt", "target", "reward_model", "extra_info", "ability", "data_source", "level"] if col in dataset.column_names]
+        cols_to_remove = [col for col in ["prompt", "source_prompt", "solution", "target", "reward_model", "extra_info", "ability", "data_source", "level"] if col in dataset.column_names]
         if cols_to_remove:
             dataset = dataset.remove_columns(cols_to_remove)
     else:
