@@ -274,6 +274,8 @@ def ppo_actor_loss_fn(
     behav_imp_weight_cap: float | None = None,
     importance_sampling_level: str = "token",
     cu_seqlens: torch.Tensor | None = None,
+    use_p3o_reweighting: bool = False,
+    p3o_tau: float = 1.0,
 ) -> tuple[torch.Tensor, dict]:
     """
     When decoupled loss is disabled:
@@ -308,6 +310,17 @@ def ppo_actor_loss_fn(
             f"Invalid importance_sampling_level: {importance_sampling_level}. "
             "Must be 'token' or 'sequence'."
         )
+
+    # P3O advantage reweighting (optional, detached)
+    # w(r) = 4 * sigmoid(tau*(r-1)) * (1 - sigmoid(tau*(r-1)))
+    # This provides off-policyness control without affecting gradients
+    if use_p3o_reweighting:
+        with torch.no_grad():
+            p = torch.sigmoid(p3o_tau * (ratio - 1.0))
+            p3o_weight = 4.0 * p * (1.0 - p)
+        advantages = advantages * p3o_weight  # Reweight advantages
+    else:
+        p3o_weight = None
 
     clipped_ratio = torch.clamp(
         ratio,
@@ -351,6 +364,129 @@ def ppo_actor_loss_fn(
         stat["behave_imp_weight"] = behav_imp_weight
         stat["behave_approx_kl"] = behav_kl
         stat["behave_mask"] = behav_mask
+    # P3O statistics
+    if use_p3o_reweighting and p3o_weight is not None:
+        stat["p3o_weight"] = torch.where(loss_mask, p3o_weight, 0.0)
+    return pg_loss, stat
+
+
+def sapo_loss_fn(
+    logprobs: torch.Tensor,
+    proximal_logprobs: torch.Tensor,
+    old_logprobs: torch.Tensor,
+    advantages: torch.Tensor,
+    tau_pos: float,
+    tau_neg: float,
+    loss_mask: torch.Tensor,
+    behav_imp_weight_cap: float | None = None,
+    importance_sampling_level: str = "token",
+    cu_seqlens: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, dict]:
+    """
+    SAPO (Soft Adaptive Policy Optimization) loss function.
+    Uses soft sigmoid gating instead of hard clipping.
+    Reference: https://arxiv.org/abs/2511.20347
+
+    Args:
+        logprobs: New policy log probabilities [batch, seq_len] or [total_tokens]
+        proximal_logprobs: Proximal policy log probabilities (for decoupled loss)
+        old_logprobs: Old policy log probabilities (behavior policy)
+        advantages: Advantage values [batch] or [total_seqs]
+        tau_pos: Temperature parameter for positive advantages (controls sigmoid gate slope)
+        tau_neg: Temperature parameter for negative advantages (controls sigmoid gate slope)
+        loss_mask: Boolean mask for valid tokens [batch, seq_len] or [total_tokens]
+        behav_imp_weight_cap: Optional cap on behavior importance weights
+        importance_sampling_level: 'token' (standard) or 'sequence' (GSPO-style)
+        cu_seqlens: Cumulative sequence lengths for packed sequences
+
+    Returns:
+        loss: Scalar loss value
+        stat: Dictionary of statistics for logging
+    """
+    loss_mask_count = loss_mask.count_nonzero() or 1
+
+    # Compute importance sampling ratio
+    if importance_sampling_level == "sequence":
+        # GSPO: Compute sequence-level geometric mean of probability ratios
+        log_ratio = logprobs - proximal_logprobs
+        ratio, advantages = _compute_sequence_level_ratio_and_advantages(
+            log_ratio, advantages, loss_mask, cu_seqlens
+        )
+    elif importance_sampling_level == "token":
+        # Standard: per-token ratio
+        log_ratio = logprobs - proximal_logprobs
+        ratio = torch.where(loss_mask, torch.exp(log_ratio), 0)
+    else:
+        raise ValueError(
+            f"Invalid importance_sampling_level: {importance_sampling_level}. "
+            "Must be 'token' or 'sequence'."
+        )
+
+    # SAPO: Soft gating with sigmoid
+    # For positive advantages: gate_pos = sigmoid(tau_pos * (ratio - 1))
+    # For negative advantages: gate_neg = sigmoid(tau_neg * (ratio - 1))
+
+    # Expand advantages to match logprobs shape if needed
+    if advantages.dim() == 1 and loss_mask.dim() == 2:
+        # advantages: [batch], loss_mask: [batch, seq_len]
+        advantages_expanded = advantages.unsqueeze(1)  # [batch, 1]
+    elif advantages.dim() == 1 and loss_mask.dim() == 1:
+        # Packed format: need to expand advantages per token
+        # This requires cu_seqlens to know which advantage applies to which token
+        if cu_seqlens is not None:
+            # Expand advantages to per-token format
+            batch_size = len(advantages)
+            advantages_expanded = torch.zeros_like(logprobs)
+            for i in range(batch_size):
+                start, end = cu_seqlens[i], cu_seqlens[i + 1]
+                advantages_expanded[start:end] = advantages[i]
+        else:
+            # Assume advantages are already per-token
+            advantages_expanded = advantages
+    else:
+        advantages_expanded = advantages
+
+    # Compute soft gates
+    gate_pos = torch.sigmoid(tau_pos * (ratio - 1))
+    gate_neg = torch.sigmoid(tau_neg * (ratio - 1))
+
+    # Select gate based on advantage sign
+    is_positive = advantages_expanded > 0
+    soft_gate = torch.where(is_positive, gate_pos, gate_neg)
+
+    # SAPO loss: -gate * advantage
+    pg_loss = -soft_gate * advantages_expanded
+
+    # Apply behavior importance weight if using decoupled loss
+    behav_kl = proximal_logprobs - old_logprobs
+    behav_imp_weight = behav_kl.exp()
+    behav_mask = (
+        (behav_imp_weight <= behav_imp_weight_cap).logical_and(loss_mask)
+        if behav_imp_weight_cap is not None
+        else loss_mask
+    )
+    behav_kl = torch.where(behav_mask, behav_kl, 0.0)
+    behav_imp_weight = torch.where(behav_mask, behav_imp_weight, 0.0)
+    pg_loss = pg_loss * behav_imp_weight
+
+    # Final loss aggregation
+    logging_loss = pg_loss.detach()
+    pg_loss = torch.where(loss_mask, pg_loss, 0).sum() / loss_mask_count
+
+    # Statistics
+    stat = dict(
+        loss=logging_loss,
+        importance_weight=ratio.detach(),
+        approx_kl=(logprobs - proximal_logprobs).detach(),
+        soft_gate=soft_gate.detach(),
+        gate_pos=gate_pos.detach(),
+        gate_neg=gate_neg.detach(),
+    )
+    if proximal_logprobs is not None:
+        stat["behave_imp_weight"] = behav_imp_weight
+        stat["behave_approx_kl"] = behav_kl
+        stat["behave_mask"] = behav_mask
+
     return pg_loss, stat
 
 

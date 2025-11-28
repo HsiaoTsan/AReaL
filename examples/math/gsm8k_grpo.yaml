@@ -72,6 +72,15 @@ actor:
     std_level: batch
   max_new_tokens: ${gconfig.max_new_tokens}
 
+  # P3O: Sigmoid-based advantage reweighting (compatible with PPO clipping)
+  use_p3o_reweighting: false
+  p3o_tau: 1.0
+
+  # SAPO: Soft Adaptive Policy Optimization (mutually exclusive with PPO)
+  use_sapo_loss: false
+  sapo_tau_pos: 1.0
+  sapo_tau_neg: 1.05
+
 ref:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}

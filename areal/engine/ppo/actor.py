@@ -364,6 +364,11 @@ class PPOActor:
                         importance_sampling_level=self.config.importance_sampling_level,
                         current_version=current_version,
                         prox_logp_method=self.config.prox_logp_method,
+                        use_p3o_reweighting=self.config.use_p3o_reweighting,
+                        p3o_tau=self.config.p3o_tau,
+                        use_sapo_loss=self.config.use_sapo_loss,
+                        sapo_tau_pos=self.config.sapo_tau_pos,
+                        sapo_tau_neg=self.config.sapo_tau_neg,
                     ),
                     loss_weight_fn=lambda x: x["loss_mask"].count_nonzero(),
                 )
@@ -499,6 +504,11 @@ def grpo_loss_fn(
     importance_sampling_level: str = "token",
     current_version: int | None = None,
     prox_logp_method: str = PROX_LOGP_METHOD_RECOMPUTE,
+    use_p3o_reweighting: bool = False,
+    p3o_tau: float = 1.0,
+    use_sapo_loss: bool = False,
+    sapo_tau_pos: float = 1.0,
+    sapo_tau_neg: float = 1.05,
 ):
     """Loss function for actor step, all inputs should be splitted into
     pipeline micro batches, returns loss and logging stats."""
@@ -593,26 +603,41 @@ def grpo_loss_fn(
             full_loss_mask = m2_full_flat.view_as(loss_mask)
         loss_mask = full_loss_mask
 
-    loss, stat = ppo_actor_loss_fn(
-        logprobs=logprobs,
-        old_logprobs=old_logp,
-        advantages=advantages,
-        eps_clip=eps_clip,
-        eps_clip_higher=eps_clip_higher,
-        loss_mask=loss_mask,
-        c_clip=c_clip,
-        proximal_logprobs=prox_logp,
-        behav_imp_weight_cap=behav_imp_weight_cap,
-        importance_sampling_level=importance_sampling_level,
-        cu_seqlens=input_data.get("cu_seqlens"),
-    )
+    # Choose loss function: SAPO or PPO
+    if use_sapo_loss:
+        from areal.utils.functional import sapo_loss_fn
+
+        loss, stat = sapo_loss_fn(
+            logprobs=logprobs,
+            old_logprobs=old_logp,
+            advantages=advantages,
+            tau_pos=sapo_tau_pos,
+            tau_neg=sapo_tau_neg,
+            loss_mask=loss_mask,
+            proximal_logprobs=prox_logp,
+            behav_imp_weight_cap=behav_imp_weight_cap,
+            importance_sampling_level=importance_sampling_level,
+            cu_seqlens=input_data.get("cu_seqlens"),
+        )
+    else:  # Standard PPO/GRPO (with optional P3O reweighting)
+        loss, stat = ppo_actor_loss_fn(
+            logprobs=logprobs,
+            old_logprobs=old_logp,
+            advantages=advantages,
+            eps_clip=eps_clip,
+            eps_clip_higher=eps_clip_higher,
+            loss_mask=loss_mask,
+            c_clip=c_clip,
+            proximal_logprobs=prox_logp,
+            behav_imp_weight_cap=behav_imp_weight_cap,
+            importance_sampling_level=importance_sampling_level,
+            cu_seqlens=input_data.get("cu_seqlens"),
+            use_p3o_reweighting=use_p3o_reweighting,
+            p3o_tau=p3o_tau,
+        )
 
     # Log training statistics
     stats_tracker.denominator(
-        # NOTE: n_tokens must have shape [batch, seq] to match vocab stats below (lines 762-767).
-        # Using torch.ones_like(loss_mask) ensures correct shape when this function is called
-        # standalone (e.g., by recipe/AEnt or tests), not just from ppo_update() which already
-        # registers n_tokens at line 401.
         n_tokens=torch.ones_like(loss_mask, dtype=torch.bool, device=logits.device),
         n_valid_tokens=loss_mask.bool(),
         clipped_tokens=stat["clip_mask"],
@@ -630,6 +655,21 @@ def grpo_loss_fn(
         dual_clip_ratio=stat["dual_clip_mask"].float(),
         denominator="n_valid_tokens",
     )
+
+    # Log P3O-specific statistics
+    if use_p3o_reweighting and "p3o_weight" in stat:
+        stats_tracker.stat(
+            p3o_weight=stat["p3o_weight"],
+            denominator="n_valid_tokens",
+        )
+    # Log SAPO-specific statistics
+    if use_sapo_loss and "soft_gate" in stat:
+        stats_tracker.stat(
+            sapo_soft_gate=stat["soft_gate"],
+            sapo_gate_pos=stat["gate_pos"],
+            sapo_gate_neg=stat["gate_neg"],
+            denominator="n_valid_tokens",
+        )
     if "behave_imp_weight" in stat:
         stats_tracker.denominator(unclipped_behave_tokens=stat["behave_mask"])
         stats_tracker.stat(
@@ -645,14 +685,16 @@ def grpo_loss_fn(
         denominator="n_tokens",
     )
 
-    clip_mask = stat["clip_mask"]
-    clipped_new_logp = torch.where(clip_mask, logprobs.detach(), 0.0)
-    clipped_old_logp = torch.where(clip_mask, old_logp, 0.0)
-    stats_tracker.stat(
-        clipped_new_logp=clipped_new_logp,
-        clipped_old_logp=clipped_old_logp,
-        denominator="clipped_tokens",
-    )
+    # Only log clipped stats for standard PPO/GRPO (not SAPO)
+    if not use_sapo_loss:
+        clip_mask = stat["clip_mask"]
+        clipped_new_logp = torch.where(clip_mask, logprobs.detach(), 0.0)
+        clipped_old_logp = torch.where(clip_mask, old_logp, 0.0)
+        stats_tracker.stat(
+            clipped_new_logp=clipped_new_logp,
+            clipped_old_logp=clipped_old_logp,
+            denominator="clipped_tokens",
+        )
 
     # Always log compute_logp metrics (not just in metrics mode)
     # Use the same mask as actual training (respects behave_imp_weight_cap)
