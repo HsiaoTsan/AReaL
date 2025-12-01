@@ -406,15 +406,17 @@ def sapo_loss_fn(
     loss_mask_count = loss_mask.count_nonzero() or 1
 
     # Compute importance sampling ratio
+    # IMPORTANT: SAPO uses old_logprobs (not proximal_logprobs) for soft gating
+    # The soft gate controls updates based on the policy ratio relative to the data collection policy
     if importance_sampling_level == "sequence":
         # GSPO: Compute sequence-level geometric mean of probability ratios
-        log_ratio = logprobs - proximal_logprobs
+        log_ratio = logprobs - old_logprobs
         ratio, advantages = _compute_sequence_level_ratio_and_advantages(
             log_ratio, advantages, loss_mask, cu_seqlens
         )
     elif importance_sampling_level == "token":
         # Standard: per-token ratio
-        log_ratio = logprobs - proximal_logprobs
+        log_ratio = logprobs - old_logprobs
         ratio = torch.where(loss_mask, torch.exp(log_ratio), 0)
     else:
         raise ValueError(
@@ -435,11 +437,15 @@ def sapo_loss_fn(
         # This requires cu_seqlens to know which advantage applies to which token
         if cu_seqlens is not None:
             # Expand advantages to per-token format
-            batch_size = len(advantages)
-            advantages_expanded = torch.zeros_like(logprobs)
-            for i in range(batch_size):
-                start, end = cu_seqlens[i], cu_seqlens[i + 1]
-                advantages_expanded[start:end] = advantages[i]
+            # cu_seqlens has shape [batch_size + 1], so batch_size = len(cu_seqlens) - 1
+            batch_size = cu_seqlens.shape[0] - 1
+            seq_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+            # Create sequence index for each token: [0,0,0,1,1,2,2,2,2,...]
+            sequence_idx = torch.arange(
+                batch_size, device=advantages.device
+            ).repeat_interleave(seq_lengths)
+            # Broadcast advantages to per-token format
+            advantages_expanded = advantages[sequence_idx]
         else:
             # Assume advantages are already per-token
             advantages_expanded = advantages
@@ -457,17 +463,23 @@ def sapo_loss_fn(
     # SAPO loss: -gate * advantage
     pg_loss = -soft_gate * advantages_expanded
 
-    # Apply behavior importance weight if using decoupled loss
-    behav_kl = proximal_logprobs - old_logprobs
-    behav_imp_weight = behav_kl.exp()
-    behav_mask = (
-        (behav_imp_weight <= behav_imp_weight_cap).logical_and(loss_mask)
-        if behav_imp_weight_cap is not None
-        else loss_mask
-    )
-    behav_kl = torch.where(behav_mask, behav_kl, 0.0)
-    behav_imp_weight = torch.where(behav_mask, behav_imp_weight, 0.0)
-    pg_loss = pg_loss * behav_imp_weight
+    # NOTE: SAPO doesn't use behavior importance weight like PPO's decoupled loss
+    # The soft gating mechanism itself provides off-policy control
+    # However, we still track behav_imp_weight for monitoring purposes
+    if proximal_logprobs is not None:
+        behav_kl = proximal_logprobs - old_logprobs
+        behav_imp_weight = behav_kl.exp()
+        behav_mask = (
+            (behav_imp_weight <= behav_imp_weight_cap).logical_and(loss_mask)
+            if behav_imp_weight_cap is not None
+            else loss_mask
+        )
+        behav_kl = torch.where(behav_mask, behav_kl, 0.0)
+        behav_imp_weight = torch.where(behav_mask, behav_imp_weight, 0.0)
+    else:
+        behav_imp_weight = None
+        behav_kl = None
+        behav_mask = None
 
     # Final loss aggregation
     logging_loss = pg_loss.detach()
@@ -477,12 +489,16 @@ def sapo_loss_fn(
     stat = dict(
         loss=logging_loss,
         importance_weight=ratio.detach(),
-        approx_kl=(logprobs - proximal_logprobs).detach(),
+        approx_kl=(logprobs - old_logprobs).detach(),  # KL relative to old policy
         soft_gate=soft_gate.detach(),
         gate_pos=gate_pos.detach(),
         gate_neg=gate_neg.detach(),
+        # SAPO doesn't use clipping, but add these keys for compatibility with logging code
+        clip_mask=torch.zeros_like(loss_mask),
+        dual_clip_mask=torch.zeros_like(loss_mask),
     )
-    if proximal_logprobs is not None:
+    # Add behavior statistics if available (for monitoring in async/decoupled scenarios)
+    if behav_imp_weight is not None:
         stat["behave_imp_weight"] = behav_imp_weight
         stat["behave_approx_kl"] = behav_kl
         stat["behave_mask"] = behav_mask
