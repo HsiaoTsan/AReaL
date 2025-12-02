@@ -586,17 +586,15 @@ class PPOActorConfig(TrainEngineConfig):
     # SAPO (Soft Adaptive Policy Optimization) - https://arxiv.org/abs/2511.20347
     use_sapo_loss: bool = field(
         default=False,
-        metadata={
-            "help": "Use SAPO loss function. Mutually exclusive with standard PPO clipping."
-        },
+        metadata={"help": "Use SAPO loss (mutually exclusive with PPO clipping)"},
     )
     sapo_tau_pos: float = field(
         default=1.0,
-        metadata={"help": "SAPO: Temperature parameter for positive advantages (controls sigmoid gate slope)"},
+        metadata={"help": "SAPO temperature for positive advantages"},
     )
     sapo_tau_neg: float = field(
         default=1.05,
-        metadata={"help": "SAPO: Temperature parameter for negative advantages (controls sigmoid gate slope)"},
+        metadata={"help": "SAPO temperature for negative advantages"},
     )
     # M2PO
     m2_threshold: float | None = field(

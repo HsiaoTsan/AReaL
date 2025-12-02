@@ -568,19 +568,6 @@ def grpo_loss_fn(
         pass  # Use prox_logp_gt as-is (should be recomputed)
     # else: PROX_LOGP_METHOD_RECOMPUTE - use prox_logp_gt as-is
 
-    # Safety check: ensure we have prox_logp
-    if prox_logp is None:
-        raise RuntimeError(
-            f"prox_logp is None after handling prox_logp_method='{prox_logp_method}'. "
-            "This indicates configuration or computation error."
-        )
-    # Verify the value is valid
-    if torch.isnan(prox_logp).any() or torch.isinf(prox_logp).any():
-        raise RuntimeError(
-            f"prox_logp contains NaN or Inf with prox_logp_method='{prox_logp_method}'. "
-            "This indicates computation failed."
-        )
-
     # If m2_threshold is set, use M2PO loss function.
     if m2_threshold is not None:
         delta = old_logp - prox_logp
@@ -603,7 +590,6 @@ def grpo_loss_fn(
             full_loss_mask = m2_full_flat.view_as(loss_mask)
         loss_mask = full_loss_mask
 
-    # Choose loss function: SAPO or PPO
     if use_sapo_loss:
         from areal.utils.functional import sapo_loss_fn
 
@@ -619,7 +605,7 @@ def grpo_loss_fn(
             importance_sampling_level=importance_sampling_level,
             cu_seqlens=input_data.get("cu_seqlens"),
         )
-    else:  # Standard PPO/GRPO (with optional P3O reweighting)
+    else:
         loss, stat = ppo_actor_loss_fn(
             logprobs=logprobs,
             old_logprobs=old_logp,
